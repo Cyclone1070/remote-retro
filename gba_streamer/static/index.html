@@ -1,12 +1,12 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>⚡ GBA Streamer (100% Lossless Bit-Exact)</title>
+    <title>⚡ GBA Streamer (Lossless Video + Crystal Audio)</title>
     <style>
         body { margin: 0; background: #09090b; color: #f4f4f5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; overflow: hidden; }
         h1 { margin: 0 0 8px 0; font-size: 22px; color: #22c55e; letter-spacing: -0.5px; }
         .main-container { display: flex; flex-direction: column; align-items: center; position: relative; }
-        .canvas-wrapper { position: relative; width: 720px; height: 480px; }
+        .canvas-wrapper { position: relative; width: 720px; height: 480px; cursor: pointer; }
         canvas { image-rendering: pixelated; border: 3px solid #27272a; border-radius: 8px; box-shadow: 0 12px 40px rgba(0,0,0,0.9); background: #000; width: 100%; height: 100%; }
         
         #loadingOverlay {
@@ -57,9 +57,9 @@
 </head>
 <body>
     <div class="main-container">
-        <h1>⚡ GBA Streamer (100% Lossless Bit-Exact)</h1>
+        <h1>⚡ GBA Streamer (Lossless Video + Crystal Audio)</h1>
         
-        <div class="canvas-wrapper">
+        <div class="canvas-wrapper" id="canvasWrapper">
             <canvas id="gbaCanvas" width="240" height="160"></canvas>
             <div id="loadingOverlay">
                 <div class="spinner"></div>
@@ -80,13 +80,13 @@
             </div>
             <div class="divider"></div>
             <div class="hud-item">
-                <span class="hud-label">Host Compute</span>
+                <span class="hud-label">Host Sim+Enc</span>
                 <span class="hud-value" id="hostLatency">0.34 ms</span>
             </div>
             <div class="divider"></div>
             <div class="hud-item">
-                <span class="hud-label">Client Decode</span>
-                <span class="hud-value" id="clientLatency">0.05 ms</span>
+                <span class="hud-label">Audio Buffer</span>
+                <span class="hud-value highlight" id="audioStatus">-- ms</span>
             </div>
             <div class="divider"></div>
             <div class="hud-item">
@@ -145,7 +145,7 @@
                     output[outputOffset++] = output[matchSrc++];
                 }
             }
-            return output;
+            return output.subarray(0, outputOffset);
         }
 
         const canvas = document.getElementById('gbaCanvas');
@@ -156,8 +156,90 @@
         const totalEl = document.getElementById('totalLatency');
         const netEl = document.getElementById('netLatency');
         const hostEl = document.getElementById('hostLatency');
-        const clientEl = document.getElementById('clientLatency');
+        const audioStatusEl = document.getElementById('audioStatus');
         const fpsEl = document.getElementById('fpsVal');
+
+        // ==========================================
+        // Proportional Phase-Locked Audio Streamer
+        // ==========================================
+        const GBA_SAMPLE_RATE = 32768;
+        const TARGET_CUSHION_SAMPLES = 850; // ~25.9 ms target cushion
+        const RING_SIZE = 65536;
+        const ringBufL = new Float32Array(RING_SIZE);
+        const ringBufR = new Float32Array(RING_SIZE);
+        let writePos = 0;
+        let readPos = 0;
+
+        window.audioCtx = null;
+        window.scriptNode = null;
+        window.getAudioQueueLength = function() {
+            let len = writePos - Math.floor(readPos);
+            if (len < 0) len += RING_SIZE;
+            return len;
+        };
+
+        window.initAudio = function() {
+            if (!window.audioCtx) {
+                window.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                const outSampleRate = window.audioCtx.sampleRate;
+                const bufferSize = 512;
+                
+                window.scriptNode = window.audioCtx.createScriptProcessor(bufferSize, 1, 2);
+                
+                // Active oscillator clock driver
+                const osc = window.audioCtx.createOscillator();
+                const silentGain = window.audioCtx.createGain();
+                silentGain.gain.value = 0;
+                osc.connect(silentGain);
+                silentGain.connect(window.scriptNode);
+                window.scriptNode.connect(window.audioCtx.destination);
+                osc.start();
+
+                window.scriptNode.onaudioprocess = (e) => {
+                    const outL = e.outputBuffer.getChannelData(0);
+                    const outR = e.outputBuffer.getChannelData(1);
+                    let available = window.getAudioQueueLength();
+
+                    // Snap if backlog exceeds 45ms
+                    if (available > 1500) {
+                        readPos = (writePos - TARGET_CUSHION_SAMPLES + RING_SIZE) % RING_SIZE;
+                        available = TARGET_CUSHION_SAMPLES;
+                    }
+
+                    // Proportional dynamic speed compensation (locks buffer to ~25ms)
+                    const baseRatio = GBA_SAMPLE_RATE / outSampleRate;
+                    const error = (available - TARGET_CUSHION_SAMPLES) / TARGET_CUSHION_SAMPLES;
+                    const speed = baseRatio * Math.max(0.96, Math.min(1.04, 1.0 + error * 0.05));
+
+                    for (let i = 0; i < bufferSize; i++) {
+                        if (available > 0) {
+                            const r = Math.floor(readPos) % RING_SIZE;
+                            outL[i] = ringBufL[r];
+                            outR[i] = ringBufR[r];
+                            readPos += speed;
+                            if (readPos >= RING_SIZE) readPos -= RING_SIZE;
+                            available -= speed;
+                        } else {
+                            outL[i] = 0;
+                            outR[i] = 0;
+                        }
+                    }
+                };
+                readPos = (writePos - TARGET_CUSHION_SAMPLES + RING_SIZE) % RING_SIZE;
+            }
+            if (window.audioCtx.state === 'suspended') {
+                window.audioCtx.resume();
+            }
+        };
+
+        window.addEventListener('click', window.initAudio);
+        window.addEventListener('keydown', window.initAudio);
+        window.addEventListener('pointerdown', window.initAudio);
+        document.addEventListener('click', window.initAudio);
+        document.getElementById('canvasWrapper').addEventListener('click', window.initAudio);
+        document.getElementById('loadingOverlay').addEventListener('click', window.initAudio);
+
+        try { window.initAudio(); } catch(e) {}
 
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = protocol + '//' + window.location.host + '/ws';
@@ -236,6 +318,35 @@
         ws.onmessage = (event) => {
             const now = performance.now();
             const bytes = new Uint8Array(event.data);
+
+            // Feed Audio immediately into Ring Buffer with explicit 16-bit LE decoding
+            if (bytes.length >= 35) {
+                const audioLen = bytes[33] | (bytes[34] << 8);
+                if (audioLen > 0) {
+                    try {
+                        const audioPayload = bytes.subarray(35, 35 + audioLen);
+                        const rawAudio = lz4Decompress(audioPayload, 4096 * 2);
+                        const numSamples = (rawAudio.length / 4) | 0;
+                        
+                        for (let i = 0; i < numSamples; i++) {
+                            let sL = (rawAudio[i * 4] | (rawAudio[i * 4 + 1] << 8));
+                            if (sL >= 0x8000) sL -= 0x10000;
+                            let sR = (rawAudio[i * 4 + 2] | (rawAudio[i * 4 + 3] << 8));
+                            if (sR >= 0x8000) sR -= 0x10000;
+
+                            const w = (writePos + i) % RING_SIZE;
+                            ringBufL[w] = sL / 32768.0;
+                            ringBufR[w] = sR / 32768.0;
+                        }
+                        writePos = (writePos + numSamples) % RING_SIZE;
+
+                        if (!window.audioCtx || window.audioCtx.state !== 'running') {
+                            readPos = (writePos - TARGET_CUSHION_SAMPLES + RING_SIZE) % RING_SIZE;
+                        }
+                    } catch(e) {}
+                }
+            }
+
             if (frameQueue.length >= 2) {
                 frameQueue.shift();
             }
@@ -263,10 +374,12 @@
                 const hostTotalMs = (hostSimUs + hostEncUs) / 1000.0;
 
                 const flag = bytes[32];
-                const payload = bytes.subarray(33);
+                const audioLen = bytes[33] | (bytes[34] << 8);
+                const videoPayload = bytes.subarray(35 + audioLen);
 
+                // Render video
                 if (flag === 4) {
-                    const decomp = lz4Decompress(payload, 2 + 32 + 19200);
+                    const decomp = lz4Decompress(videoPayload, 2 + 32 + 19200);
                     const palLen = decomp[0] | (decomp[1] << 8);
                     const pal16 = new Uint16Array(decomp.buffer, decomp.byteOffset + 2, palLen);
                     const packed = decomp.subarray(2 + palLen * 2);
@@ -287,7 +400,7 @@
                         data32[i * 2 + 1] = (255 << 24) | (b1 << 16) | (g1 << 8) | r1;
                     }
                 } else if (flag === 2) {
-                    const decomp = lz4Decompress(payload, 2 + 512 + 38400);
+                    const decomp = lz4Decompress(videoPayload, 2 + 512 + 38400);
                     const palLen = decomp[0] | (decomp[1] << 8);
                     const pal16 = new Uint16Array(decomp.buffer, decomp.byteOffset + 2, palLen);
                     const indices = decomp.subarray(2 + palLen * 2);
@@ -300,7 +413,7 @@
                         data32[i] = (255 << 24) | (b << 16) | (g << 8) | r;
                     }
                 } else if (flag === 1) {
-                    const raw = lz4Decompress(payload, 38400 * 2);
+                    const raw = lz4Decompress(videoPayload, 38400 * 2);
                     const src16 = new Uint16Array(raw.buffer, raw.byteOffset, 38400);
                     for (let i = 0; i < 38400; i++) {
                         const p16 = src16[i];
@@ -324,11 +437,12 @@
                     lastTime = now;
                     const avgClient = decompTimes.reduce((a,b)=>a+b,0)/decompTimes.length;
                     const totalM2P = networkRtt + hostTotalMs + avgClient + 8.37 + BUFFER_DELAY_MS;
+                    const audioBufferMs = (window.getAudioQueueLength() / GBA_SAMPLE_RATE * 1000).toFixed(1);
 
                     totalEl.innerText = totalM2P.toFixed(1) + ' ms';
                     netEl.innerText = networkRtt.toFixed(1) + ' ms';
                     hostEl.innerText = hostTotalMs.toFixed(2) + ' ms';
-                    clientEl.innerText = avgClient.toFixed(2) + ' ms';
+                    audioStatusEl.innerText = audioBufferMs + ' ms';
                     fpsEl.innerText = fps;
                     decompTimes = [];
                 }

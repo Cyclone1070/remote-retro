@@ -41,3 +41,11 @@ path = "benches/bench_anguna_colors.rs"
 [[bin]]
 name = "bench_16color_gain"
 path = "benches/bench_16color_gain.rs"
+
+[[bin]]
+name = "verify_audio"
+path = "benches/verify_audio.rs"
+
+[[bin]]
+name = "record_wav"
+path = "benches/record_wav.rs"

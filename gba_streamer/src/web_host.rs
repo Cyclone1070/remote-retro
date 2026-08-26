@@ -5,13 +5,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use warp::ws::Ws;
 use warp::Filter;
 
-use crate::codec::PaletteEncoder;
+use crate::codec::{AudioEncoder, PaletteEncoder};
 use crate::core::RetroCore;
 
 const BROWSER_HTML: &str = include_str!("../static/index.html");
 
 pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String) -> Result<()> {
-    println!("=== Starting GBA WebHost (Lossless Bit-Exact) ===");
+    println!("=== Starting GBA WebHost (A/V Synchronized Bit-Exact Stream) ===");
     let mut core = RetroCore::load(&core_path, &rom_path)?;
 
     let (tx, _rx) = tokio::sync::broadcast::channel::<Arc<Vec<u8>>>(4);
@@ -28,6 +28,7 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
 
     std::thread::spawn(move || {
         let mut encoder = PaletteEncoder::new();
+        let mut audio_enc = AudioEncoder::new(44100);
 
         loop {
             let frame_start = Instant::now();
@@ -37,27 +38,37 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
             let current_mask = mask_producer.load(Ordering::Relaxed);
 
             core.set_input(current_mask);
-            let (sim_us, raw_frame) = core.step();
+            let (sim_us, raw_frame, audio_samples) = core.step();
 
             if !raw_frame.is_empty() {
                 let t_enc = Instant::now();
-                let (flag, payload) = encoder.encode(&raw_frame);
+                let (flag, video_payload) = encoder.encode(&raw_frame);
                 let enc_us = t_enc.elapsed().as_micros() as u32;
+
+                let t_audio = Instant::now();
+                if !audio_samples.is_empty() {
+                    audio_enc.push_samples(&audio_samples);
+                }
+                let audio_payload = audio_enc.flush_frame_lz4().unwrap_or_default();
+                let audio_enc_us = t_audio.elapsed().as_micros() as u32;
 
                 let now_us = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_micros() as u64;
 
-                let mut packet = Vec::with_capacity(33 + payload.len());
+                let audio_len = audio_payload.len() as u16;
+                let mut packet = Vec::with_capacity(35 + audio_payload.len() + video_payload.len());
                 packet.extend_from_slice(&matched_seq.to_le_bytes());
                 packet.extend_from_slice(&matched_t_us.to_le_bytes());
                 packet.extend_from_slice(&sim_us.to_le_bytes());
-                packet.extend_from_slice(&0u32.to_le_bytes());
+                packet.extend_from_slice(&audio_enc_us.to_le_bytes());
                 packet.extend_from_slice(&enc_us.to_le_bytes());
                 packet.extend_from_slice(&now_us.to_le_bytes());
                 packet.push(flag);
-                packet.extend_from_slice(&payload);
+                packet.extend_from_slice(&audio_len.to_le_bytes());
+                packet.extend_from_slice(&audio_payload);
+                packet.extend_from_slice(&video_payload);
 
                 let _ = tx_producer.send(Arc::new(packet));
             }

@@ -39,7 +39,7 @@ pub async fn run_udp_host(
             }
         }
 
-        let (sim_us, raw_frame) = core.step();
+        let (sim_us, raw_frame, _audio) = core.step();
 
         if !raw_frame.is_empty() {
             let t_enc = Instant::now();

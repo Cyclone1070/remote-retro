@@ -27,6 +27,7 @@ struct RetroGameInfo {
 }
 
 static LAST_FRAME_16: Mutex<Vec<u16>> = Mutex::new(Vec::new());
+static AUDIO_BUFFER: Mutex<Vec<i16>> = Mutex::new(Vec::new());
 static INPUT_STATE: AtomicI16 = AtomicI16::new(0);
 
 unsafe extern "C" fn video_refresh_callback(
@@ -49,10 +50,21 @@ unsafe extern "C" fn video_refresh_callback(
     }
 }
 
-unsafe extern "C" fn audio_sample_callback(_left: i16, _right: i16) {}
-unsafe extern "C" fn audio_sample_batch_callback(_data: *const i16, frames: usize) -> usize {
+unsafe extern "C" fn audio_sample_callback(left: i16, right: i16) {
+    let mut guard = AUDIO_BUFFER.lock().unwrap();
+    guard.push(left);
+    guard.push(right);
+}
+
+unsafe extern "C" fn audio_sample_batch_callback(data: *const i16, frames: usize) -> usize {
+    if !data.is_null() && frames > 0 {
+        let mut guard = AUDIO_BUFFER.lock().unwrap();
+        let samples = unsafe { std::slice::from_raw_parts(data, frames * 2) };
+        guard.extend_from_slice(samples);
+    }
     frames
 }
+
 unsafe extern "C" fn input_poll_callback() {}
 unsafe extern "C" fn input_state_callback(
     _port: c_uint,
@@ -162,13 +174,16 @@ impl RetroCore {
         INPUT_STATE.store(mask, Ordering::Relaxed);
     }
 
-    pub fn step(&mut self) -> (u32, Vec<u16>) {
+    pub fn step(&mut self) -> (u32, Vec<u16>, Vec<i16>) {
         let t0 = Instant::now();
         unsafe {
             (self.retro_run)();
         }
         let sim_us = t0.elapsed().as_micros() as u32;
         let frame = LAST_FRAME_16.lock().unwrap().clone();
-        (sim_us, frame)
+        let mut audio = AUDIO_BUFFER.lock().unwrap();
+        let audio_samples = audio.clone();
+        audio.clear();
+        (sim_us, frame, audio_samples)
     }
 }
