@@ -1,0 +1,30 @@
+---
+- name: Setup Ephemeral Stream & Canvas Environment
+  hosts: all
+  tasks:
+    - name: Record pre-test installed packages
+      ansible.builtin.shell:
+        cmd: rpm -qa > /tmp/ephemeral_pkgs_before.txt
+      changed_when: false
+
+    - name: Temporarily open ephemeral test ports in firewalld
+      become: true
+      ansible.builtin.shell:
+        cmd: firewall-cmd --add-port=49152-49155/tcp --add-port=49152-49155/udp
+      changed_when: false
+
+    - name: Deploy interactive canvas streamer
+      ansible.builtin.copy:
+        src: interactive_canvas.py
+        dest: /tmp/ephemeral_canvas.py
+        mode: '0755'
+
+    - name: Stop previous ephemeral unit if running
+      ansible.builtin.shell:
+        cmd: systemctl --user stop ephemeral-stream || true; systemctl --user reset-failed ephemeral-stream || true
+      changed_when: false
+
+    - name: Launch ephemeral canvas server as transient systemd user service
+      ansible.builtin.shell:
+        cmd: systemd-run --user --unit=ephemeral-stream python3 /tmp/ephemeral_canvas.py
+      changed_when: false

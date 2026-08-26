@@ -1,0 +1,99 @@
+---
+- name: Teardown Real Sunshine and Clean All Residue
+  hosts: all
+  tasks:
+    - name: Stop and disable ephemeral user services
+      ansible.builtin.shell:
+        cmd: |
+          systemctl --user stop ephemeral-sunshine.service 2>/dev/null || true
+          systemctl --user stop ephemeral-desktop.service 2>/dev/null || true
+          systemctl --user disable ephemeral-sunshine.service 2>/dev/null || true
+          systemctl --user disable ephemeral-desktop.service 2>/dev/null || true
+      changed_when: false
+
+    - name: Unload PipeWire / PulseAudio null sinks
+      ansible.builtin.shell:
+        cmd: |
+          pkill -9 -x pw-cat 2>/dev/null || true
+          for id in $(pactl list short modules 2>/dev/null | grep null-sink | awk '{print $1}'); do
+            pactl unload-module $id 2>/dev/null || true
+          done
+      changed_when: false
+
+    - name: Terminate Sunshine, Xorg, Openbox, xterm, xclock and Xvfb processes
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          pkill -9 -x sunshine 2>/dev/null || true
+          pkill -9 -x Xvfb 2>/dev/null || true
+          pkill -9 -x openbox 2>/dev/null || true
+          pkill -9 -x xterm 2>/dev/null || true
+          pkill -9 -x xclock 2>/dev/null || true
+          pkill -9 -x xdotool 2>/dev/null || true
+          pkill -9 -x pw-cat 2>/dev/null || true
+      changed_when: false
+
+    - name: Remove ephemeral systemd unit files and configs
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /home/cyc/.config/systemd/user/ephemeral-desktop.service
+        - /home/cyc/.config/systemd/user/ephemeral-sunshine.service
+        - /home/cyc/.config/sunshine
+        - /home/cyc/.config/wireplumber/wireplumber.conf.d/50-disable-suspend.conf
+        - /tmp/xvfb.log
+        - /tmp/sunshine.log
+
+    - name: Reload systemd user daemon and restart WirePlumber
+      ansible.builtin.shell:
+        cmd: |
+          systemctl --user reset-failed 2>/dev/null || true
+          systemctl --user daemon-reload
+          systemctl --user restart wireplumber pipewire pipewire-pulse 2>/dev/null || true
+      changed_when: false
+
+    - name: Restore firewall state (drop temporary ports)
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          firewall-cmd --remove-port=47984-48010/tcp --remove-port=47998-48010/udp --permanent 2>/dev/null || true
+          firewall-cmd --remove-port=48100/udp --remove-port=48200/udp --permanent 2>/dev/null || true
+          firewall-cmd --remove-port=41641/udp --permanent 2>/dev/null || true
+          firewall-cmd --zone=trusted --remove-interface=tailscale0 --permanent 2>/dev/null || true
+          firewall-cmd --reload 2>/dev/null || true
+      changed_when: false
+
+    - name: Restore Wi-Fi power save (on)
+      become: true
+      ansible.builtin.shell:
+        cmd: iw dev wlp0s20f3 set power_save on 2>/dev/null || true
+      changed_when: false
+
+    - name: Remove newly installed test packages
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          if [ -f /tmp/ephemeral_sunshine_pkgs_before.txt ]; then
+            rpm -qa > /tmp/ephemeral_sunshine_pkgs_after.txt
+            diff /tmp/ephemeral_sunshine_pkgs_before.txt /tmp/ephemeral_sunshine_pkgs_after.txt | grep '^> ' | sed 's/^> //' > /tmp/ephemeral_diff.txt
+            if [ -s /tmp/ephemeral_diff.txt ]; then
+              dnf remove -y $(cat /tmp/ephemeral_diff.txt)
+            fi
+            rm -f /tmp/ephemeral_diff.txt /tmp/ephemeral_sunshine_pkgs_before.txt /tmp/ephemeral_sunshine_pkgs_after.txt
+          fi
+      changed_when: false
+
+    - name: Remove iroh test directory and logs
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /home/cyc/iroh_stream_proxy
+        - /tmp/iroh_server.log
+
+    - name: Audit clean state
+      ansible.builtin.shell:
+        cmd: |
+          ! pgrep -x sunshine && ! pgrep -x Xvfb && [ ! -d /home/cyc/.config/sunshine ]
+      changed_when: false

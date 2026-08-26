@@ -1,0 +1,165 @@
+---
+- name: Setup Real Sunshine and Headless Display Environment
+  hosts: all
+  tasks:
+    - name: Record pre-install package list
+      ansible.builtin.shell:
+        cmd: rpm -qa > /tmp/ephemeral_sunshine_pkgs_before.txt
+      changed_when: false
+
+    - name: Install Xvfb, Openbox, xterm, xsetroot, xclock, xdotool, rust, cargo and Sunshine RPM
+      become: true
+      ansible.builtin.dnf:
+        name:
+          - xorg-x11-server-Xvfb
+          - openbox
+          - xterm
+          - xsetroot
+          - xclock
+          - xdotool
+          - rust
+          - cargo
+          - pipewire-utils
+          - https://github.com/LizardByte/Sunshine/releases/download/v2026.817.185037/Sunshine-2026.817.185037-1.fc44.x86_64.rpm
+        state: present
+        disable_gpg_check: true
+
+    - name: Disable Wi-Fi power save on host interface
+      become: true
+      ansible.builtin.shell:
+        cmd: iw dev wlp0s20f3 set power_save off 2>/dev/null || true
+      changed_when: false
+
+    - name: Open Sunshine and Tailscale firewall ports runtime
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          firewall-cmd --add-port=47984-48010/tcp --add-port=47998-48010/udp --permanent
+          firewall-cmd --add-port=41641/udp --permanent 2>/dev/null || true
+          firewall-cmd --zone=trusted --add-interface=tailscale0 --permanent 2>/dev/null || true
+          firewall-cmd --reload
+      changed_when: false
+
+    - name: Create systemd user service directory
+      ansible.builtin.file:
+        path: /home/cyc/.config/systemd/user
+        state: directory
+        mode: '0755'
+
+    - name: Create Sunshine config directory
+      ansible.builtin.file:
+        path: /home/cyc/.config/sunshine
+        state: directory
+        mode: '0755'
+
+    - name: Deploy Sunshine configuration file
+      ansible.builtin.copy:
+        dest: /home/cyc/.config/sunshine/sunshine.conf
+        content: |
+          capture = x11
+          encoder = vaapi
+          address_family = both
+          ping_timeout = 60000
+          min_log_level = info
+        mode: '0644'
+
+    - name: Deploy Sunshine apps.json
+      ansible.builtin.copy:
+        dest: /home/cyc/.config/sunshine/apps.json
+        content: |
+          {
+            "env": {
+              "PATH": "$(PATH):$(HOME)/.local/bin"
+            },
+            "apps": [
+              {
+                "name": "Desktop",
+                "image-path": "desktop.png"
+              }
+            ]
+          }
+        mode: '0644'
+
+    - name: Create WirePlumber config directory
+      ansible.builtin.file:
+        path: /home/cyc/.config/wireplumber/wireplumber.conf.d
+        state: directory
+        mode: '0755'
+
+    - name: Deploy WirePlumber disable suspend config
+      ansible.builtin.copy:
+        dest: /home/cyc/.config/wireplumber/wireplumber.conf.d/50-disable-suspend.conf
+        content: |
+          monitor.alsa.rules = [
+            {
+              matches = [
+                {
+                  node.name = "~.*"
+                }
+              ]
+              actions = {
+                update-props = {
+                  session.suspend-timeout-seconds = 0
+                }
+              }
+            }
+          ]
+        mode: '0644'
+
+    - name: Deploy ephemeral-desktop systemd service
+      ansible.builtin.copy:
+        dest: /home/cyc/.config/systemd/user/ephemeral-desktop.service
+        content: |
+          [Unit]
+          Description=Ephemeral Xvfb and Openbox Desktop
+          After=network.target
+
+          [Service]
+          Type=simple
+          Environment=DISPLAY=:99
+          Environment=XDG_RUNTIME_DIR=/run/user/1002
+          Environment=PULSE_SERVER=/run/user/1002/pulse/native
+          ExecStartPre=-/usr/bin/pkill -9 -x Xvfb
+          ExecStartPre=-/usr/bin/pkill -9 -x openbox
+          ExecStartPre=/usr/bin/pactl load-module module-null-sink sink_name=sink-sunshine-stereo sink_properties=device.description=sink-sunshine-stereo,node.pause-on-idle=false,session.suspend-timeout-seconds=0
+          ExecStartPre=/usr/bin/pactl set-default-sink sink-sunshine-stereo
+          ExecStart=/bin/sh -c 'Xvfb :99 -screen 0 1920x1080x24 -ac & while ! xsetroot -solid "#2a4d69" 2>/dev/null; do sleep 0.2; done; openbox & xclock -geometry 300x300+100+100 -update 1 & xterm -geometry 120x40+450+100 -title "Elitedesk Real Stream Shell"'
+          Restart=always
+          RestartSec=2s
+
+          [Install]
+          WantedBy=default.target
+        mode: '0644'
+
+    - name: Deploy ephemeral-sunshine systemd service
+      ansible.builtin.copy:
+        dest: /home/cyc/.config/systemd/user/ephemeral-sunshine.service
+        content: |
+          [Unit]
+          Description=Ephemeral Sunshine Streaming Daemon
+          After=network.target ephemeral-desktop.service
+
+          [Service]
+          Type=simple
+          Environment=DISPLAY=:99
+          Environment=XDG_RUNTIME_DIR=/run/user/1002
+          Environment=PULSE_SERVER=/run/user/1002/pulse/native
+          ExecStart=/usr/bin/sunshine /home/cyc/.config/sunshine/sunshine.conf
+          Restart=always
+          RestartSec=2s
+
+          [Install]
+          WantedBy=default.target
+        mode: '0644'
+
+    - name: Restart WirePlumber and user services
+      ansible.builtin.shell:
+        cmd: |
+          systemctl --user restart wireplumber pipewire pipewire-pulse 2>/dev/null || true
+          sleep 1
+          systemctl --user daemon-reload
+          systemctl --user restart ephemeral-desktop
+          sleep 2
+          systemctl --user restart ephemeral-sunshine
+          sleep 2
+      changed_when: false

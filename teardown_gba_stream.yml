@@ -1,0 +1,49 @@
+---
+- name: Teardown Headless GBA Streaming Benchmark Host
+  hosts: elitedesk
+  gather_facts: true
+
+  tasks:
+    - name: Terminate any running GBA streamer and CloudRetro processes
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          pkill -9 -f gba_stream_host 2>/dev/null || true
+          pkill -9 -f coordinator 2>/dev/null || true
+          pkill -9 -f worker 2>/dev/null || true
+      changed_when: false
+
+    - name: Restore firewall state (remove GBA streaming and CloudRetro ports)
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          firewall-cmd --remove-port=48500/udp --remove-port=48500/tcp --permanent 2>/dev/null || true
+          firewall-cmd --remove-port=8000/tcp --remove-port=8000-8100/udp --permanent 2>/dev/null || true
+          firewall-cmd --reload 2>/dev/null || true
+      changed_when: false
+
+    - name: Restore Wi-Fi power save (on)
+      become: true
+      ansible.builtin.shell:
+        cmd: iw dev wlp0s20f3 set power_save on
+      changed_when: false
+
+    - name: Remove GBA workspace, CloudRetro build and temporary files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /home/cyc/gba_streamer
+        - /home/cyc/cloud-game-repo
+        - /tmp/ephemeral_gba_pkgs_before.txt
+        - /tmp/ephemeral_gba_pkgs_after.txt
+        - /tmp/ephemeral_gba_pkgs_diff.txt
+        - /tmp/gba_host.log
+        - /tmp/coordinator.log
+        - /tmp/worker.log
+
+    - name: Audit clean state
+      ansible.builtin.shell:
+        cmd: |
+          ! pgrep -f gba_stream_host && [ ! -d /home/cyc/gba_stream_host ]
+      changed_when: false

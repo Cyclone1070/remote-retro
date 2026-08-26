@@ -1,0 +1,35 @@
+---
+- name: Teardown and Complete Purge of Ephemeral Environment
+  hosts: all
+  tasks:
+    - name: Stop and reset transient systemd service
+      ansible.builtin.shell:
+        cmd: systemctl --user stop ephemeral-stream || true; systemctl --user reset-failed ephemeral-stream || true
+      changed_when: false
+
+    - name: Restore Wi-Fi power save to default (on)
+      become: true
+      ansible.builtin.shell:
+        cmd: iw dev wlp0s20f3 set power_save on || true
+      changed_when: false
+
+    - name: Remove temporary firewalld test ports
+      become: true
+      ansible.builtin.shell:
+        cmd: firewall-cmd --remove-port=49152-49155/tcp --remove-port=49152-49155/udp || true; firewall-cmd --reload || true
+      changed_when: false
+
+    - name: Remove all ephemeral files and saved frames from host
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/ephemeral_canvas.py
+        - /tmp/ephemeral_pkgs_before.txt
+        - /tmp/ephemeral_frames
+
+    - name: Audit clean host state
+      ansible.builtin.shell:
+        cmd: |
+          ! systemctl --user is-active --quiet ephemeral-stream && [ ! -f /tmp/ephemeral_canvas.py ]
+      changed_when: false

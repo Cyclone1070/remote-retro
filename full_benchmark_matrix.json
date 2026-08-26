@@ -1,0 +1,38 @@
+{
+  "LAN IPv4 (Power Save OFF)": {
+    "min_ms": 3.0,
+    "avg_ms": 3.99,
+    "p95_ms": 5.38,
+    "max_ms": 6.51,
+    "stddev_ms": 0.66,
+    "loss_rate_pct": 0.0,
+    "samples": 150
+  },
+  "LAN IPv4 (Power Save ON)": {
+    "min_ms": 2.84,
+    "avg_ms": 14.59,
+    "p95_ms": 116.27,
+    "max_ms": 179.58,
+    "stddev_ms": 33.75,
+    "loss_rate_pct": 0.0,
+    "samples": 150
+  },
+  "Tailscale Direct P2P (WireGuard)": {
+    "min_ms": 0,
+    "avg_ms": 0,
+    "p95_ms": 0,
+    "max_ms": 0,
+    "stddev_ms": 0,
+    "loss_rate_pct": 100.0,
+    "samples": 0
+  },
+  "Tailscale with Power Save ON": {
+    "min_ms": 0,
+    "avg_ms": 0,
+    "p95_ms": 0,
+    "max_ms": 0,
+    "stddev_ms": 0,
+    "loss_rate_pct": 100.0,
+    "samples": 0
+  }
+}

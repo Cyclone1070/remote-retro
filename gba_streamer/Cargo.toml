@@ -1,0 +1,66 @@
+[package]
+name = "gba_streamer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lz4_flex = "0.11"
+clap = { version = "4.4", features = ["derive"] }
+libloading = "0.8"
+anyhow = "1.0"
+minifb = "0.27"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+warp = "0.3"
+
+[features]
+default = []
+
+[[bin]]
+name = "bench_codecs"
+path = "src/bench_codecs.rs"
+
+[[bin]]
+name = "bench_interactive"
+path = "src/bench_interactive.rs"
+
+[[bin]]
+name = "bench_live_ws"
+path = "src/bench_live_ws.rs"
+
+[[bin]]
+name = "bench_closed_loop_m2p"
+path = "src/bench_closed_loop_m2p.rs"
+
+[[bin]]
+name = "bench_closed_loop_udp"
+path = "src/bench_closed_loop_udp.rs"
+
+[[bin]]
+name = "bench_delta_stream"
+path = "src/bench_delta_stream.rs"
+
+[[bin]]
+name = "bench_heavy_input_stress"
+path = "src/bench_heavy_input_stress.rs"
+
+[[bin]]
+name = "bench_master_matrix"
+path = "src/bench_master_matrix.rs"
+
+[[bin]]
+name = "bench_master_udp"
+path = "src/bench_master_udp.rs"
+
+[[bin]]
+name = "bench_ghosting_and_m2p"
+path = "src/bench_ghosting_and_m2p.rs"
+
+[[bin]]
+name = "bench_gba_domain_codecs"
+path = "src/bench_gba_domain_codecs.rs"
+
+[[bin]]
+name = "bench_real_gba_codecs"
+path = "src/bench_real_gba_codecs.rs"

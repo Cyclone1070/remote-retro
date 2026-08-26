@@ -1,0 +1,49 @@
+---
+- name: Setup Headless GBA Streaming Benchmark Host
+  hosts: elitedesk
+  gather_facts: true
+
+  tasks:
+    - name: Record package snapshot before install
+      ansible.builtin.shell:
+        cmd: rpm -qa > /tmp/ephemeral_gba_pkgs_before.txt
+      changed_when: false
+
+    - name: Install libretro-mgba, rust, cargo, go, gstreamer and build dependencies
+      become: true
+      ansible.builtin.dnf:
+        name:
+          - libretro-mgba
+          - rust
+          - cargo
+          - golang
+          - libX11-devel
+          - glib2-devel
+          - gstreamer1-devel
+          - gstreamer1-plugins-base-devel
+          - gstreamer1-plugins-good
+          - gstreamer1-plugins-bad-free
+        state: present
+      register: dnf_result
+
+    - name: Record newly installed packages for strict teardown
+      ansible.builtin.shell:
+        cmd: |
+          rpm -qa > /tmp/ephemeral_gba_pkgs_after.txt
+          comm -13 <(sort /tmp/ephemeral_gba_pkgs_before.txt) <(sort /tmp/ephemeral_gba_pkgs_after.txt) > /tmp/ephemeral_gba_pkgs_diff.txt
+      changed_when: false
+
+    - name: Disable Wi-Fi power save for minimal jitter
+      become: true
+      ansible.builtin.shell:
+        cmd: iw dev wlp0s20f3 set power_save off
+      changed_when: false
+
+    - name: Open UDP and TCP ports for GBA streaming and CloudRetro in firewall
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          firewall-cmd --add-port=48500/udp --add-port=48500/tcp --permanent
+          firewall-cmd --add-port=8000/tcp --add-port=8000-8100/udp --permanent
+          firewall-cmd --reload
+      changed_when: false
