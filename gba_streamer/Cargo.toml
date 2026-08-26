@@ -2,6 +2,7 @@
 name = "gba_streamer"
 version = "0.1.0"
 edition = "2021"
+autobenches = false
 
 [dependencies]
 libloading = "0.8"
@@ -13,26 +14,30 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1.0"
 lz4_flex = "0.11"
 
+[lib]
+name = "gba_streamer"
+path = "src/lib.rs"
+
 [[bin]]
 name = "gba_streamer"
 path = "src/main.rs"
 
 [[bin]]
 name = "bench_ghosting_and_m2p"
-path = "src/bench_ghosting_and_m2p.rs"
+path = "benches/bench_ghosting_and_m2p.rs"
 
 [[bin]]
 name = "bench_master_udp"
-path = "src/bench_master_udp.rs"
+path = "benches/bench_master_udp.rs"
 
 [[bin]]
 name = "bench_ab_scorecard"
-path = "src/bench_ab_scorecard.rs"
+path = "benches/bench_ab_scorecard.rs"
 
 [[bin]]
 name = "bench_anguna_colors"
-path = "src/bench_anguna_colors.rs"
+path = "benches/bench_anguna_colors.rs"
 
 [[bin]]
 name = "bench_16color_gain"
-path = "src/bench_16color_gain.rs"
+path = "benches/bench_16color_gain.rs"

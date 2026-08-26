@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>⚡ GBA Streamer (100% Lossless Bit-Exact)</title>
+    <style>
+        body { margin: 0; background: #09090b; color: #f4f4f5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; overflow: hidden; }
+        h1 { margin: 0 0 8px 0; font-size: 22px; color: #22c55e; letter-spacing: -0.5px; }
+        .main-container { display: flex; flex-direction: column; align-items: center; position: relative; }
+        .canvas-wrapper { position: relative; width: 720px; height: 480px; }
+        canvas { image-rendering: pixelated; border: 3px solid #27272a; border-radius: 8px; box-shadow: 0 12px 40px rgba(0,0,0,0.9); background: #000; width: 100%; height: 100%; }
+        
+        #loadingOverlay {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(9, 9, 11, 0.92);
+            backdrop-filter: blur(8px);
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 50;
+            transition: opacity 0.2s ease, visibility 0.2s ease;
+        }
+        .spinner {
+            width: 44px; height: 44px;
+            border: 4px solid #27272a;
+            border-top: 4px solid #22c55e;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-bottom: 14px;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .load-title { font-size: 16px; font-weight: bold; color: #f4f4f5; margin-bottom: 6px; }
+        .load-sub { font-size: 13px; color: #a1a1aa; }
+
+        .hud-banner {
+            margin-top: 14px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            background: #18181b;
+            border: 1px solid #3f3f46;
+            padding: 10px 24px;
+            border-radius: 8px;
+            font-size: 14px;
+        }
+        .hud-item { display: flex; flex-direction: column; align-items: center; }
+        .hud-label { font-size: 10px; color: #a1a1aa; text-transform: uppercase; font-weight: bold; }
+        .hud-value { font-size: 16px; font-weight: 700; color: #fafafa; }
+        .hud-value.highlight { color: #4ade80; }
+        .divider { width: 1px; height: 26px; background: #3f3f46; }
+
+        .controls-card { margin-top: 12px; background: #141417; border: 1px solid #27272a; border-radius: 8px; padding: 10px 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px; color: #a1a1aa; }
+        kbd { background: #27272a; border: 1px solid #52525b; border-radius: 4px; padding: 1px 6px; font-weight: bold; color: #fafafa; }
+    </style>
+</head>
+<body>
+    <div class="main-container">
+        <h1>⚡ GBA Streamer (100% Lossless Bit-Exact)</h1>
+        
+        <div class="canvas-wrapper">
+            <canvas id="gbaCanvas" width="240" height="160"></canvas>
+            <div id="loadingOverlay">
+                <div class="spinner"></div>
+                <div class="load-title">⚡ Connecting to GBA Stream...</div>
+                <div class="load-sub" id="connStatus">Initializing presentation pipeline</div>
+            </div>
+        </div>
+
+        <div class="hud-banner">
+            <div class="hud-item">
+                <span class="hud-label">Est. M2P Lag</span>
+                <span class="hud-value highlight" id="totalLatency">-- ms</span>
+            </div>
+            <div class="divider"></div>
+            <div class="hud-item">
+                <span class="hud-label">Network RTT</span>
+                <span class="hud-value" id="netLatency">-- ms</span>
+            </div>
+            <div class="divider"></div>
+            <div class="hud-item">
+                <span class="hud-label">Host Compute</span>
+                <span class="hud-value" id="hostLatency">0.34 ms</span>
+            </div>
+            <div class="divider"></div>
+            <div class="hud-item">
+                <span class="hud-label">Client Decode</span>
+                <span class="hud-value" id="clientLatency">0.05 ms</span>
+            </div>
+            <div class="divider"></div>
+            <div class="hud-item">
+                <span class="hud-label">Delivered FPS</span>
+                <span class="hud-value highlight" id="fpsVal">60.0</span>
+            </div>
+        </div>
+
+        <div class="controls-card">
+            <div><strong>D-Pad:</strong> <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or <kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd></div>
+            <div><strong>A Button:</strong> <kbd>Z</kbd> or <kbd>J</kbd></div>
+            <div><strong>B Button:</strong> <kbd>X</kbd> or <kbd>K</kbd></div>
+            <div><strong>Start / Select:</strong> <kbd>Enter</kbd> / <kbd>Space</kbd></div>
+        </div>
+    </div>
+
+    <!-- Fast pure JS LZ4 block decompressor -->
+    <script>
+        function lz4Decompress(input, uncompressedSize) {
+            const output = new Uint8Array(uncompressedSize);
+            let inputOffset = 4;
+            let outputOffset = 0;
+
+            while (inputOffset < input.length && outputOffset < uncompressedSize) {
+                const token = input[inputOffset++];
+                let literalLength = token >> 4;
+
+                if (literalLength === 15) {
+                    let s;
+                    do {
+                        s = input[inputOffset++];
+                        literalLength += s;
+                    } while (s === 255);
+                }
+
+                for (let i = 0; i < literalLength; i++) {
+                    output[outputOffset++] = input[inputOffset++];
+                }
+
+                if (outputOffset >= uncompressedSize) break;
+
+                const offset = input[inputOffset++] | (input[inputOffset++] << 8);
+                if (offset === 0) break;
+
+                let matchLength = (token & 0x0F) + 4;
+                if (matchLength === 19) {
+                    let s;
+                    do {
+                        s = input[inputOffset++];
+                        matchLength += s;
+                    } while (s === 255);
+                }
+
+                let matchSrc = outputOffset - offset;
+                for (let i = 0; i < matchLength; i++) {
+                    output[outputOffset++] = output[matchSrc++];
+                }
+            }
+            return output;
+        }
+
+        const canvas = document.getElementById('gbaCanvas');
+        const ctx = canvas.getContext('2d');
+        const imgData = ctx.createImageData(240, 160);
+        const data32 = new Uint32Array(imgData.data.buffer);
+        
+        const totalEl = document.getElementById('totalLatency');
+        const netEl = document.getElementById('netLatency');
+        const hostEl = document.getElementById('hostLatency');
+        const clientEl = document.getElementById('clientLatency');
+        const fpsEl = document.getElementById('fpsVal');
+
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = protocol + '//' + window.location.host + '/ws';
+        const ws = new WebSocket(wsUrl);
+        ws.binaryType = 'arraybuffer';
+
+        let inputMask = 0;
+        let inputSeq = 0;
+        let frameCount = 0;
+        let lastTime = performance.now();
+        let decompTimes = [];
+        let networkRtt = 10.0;
+        let isReady = false;
+
+        const BUFFER_DELAY_MS = 8.0;
+        const frameQueue = [];
+
+        async function updatePing() {
+            const t0 = performance.now();
+            try {
+                const res = await fetch('/ping', { cache: 'no-store' });
+                if (res.ok) {
+                    networkRtt = performance.now() - t0;
+                }
+            } catch(e) {}
+        }
+        setInterval(updatePing, 1000);
+        updatePing();
+
+        setInterval(() => {
+            if (isReady && ws.readyState === WebSocket.OPEN) {
+                inputSeq++;
+                const nowUs = Math.round(performance.now() * 1000);
+                const buf = new Uint8Array(14);
+                buf[0] = inputSeq & 0xFF;
+                buf[1] = (inputSeq >> 8) & 0xFF;
+                buf[2] = (inputSeq >> 16) & 0xFF;
+                buf[3] = (inputSeq >> 24) & 0xFF;
+                for (let i = 0; i < 8; i++) {
+                    buf[4 + i] = (nowUs / Math.pow(2, 8 * i)) & 0xFF;
+                }
+                buf[12] = inputMask & 0xFF;
+                buf[13] = (inputMask >> 8) & 0xFF;
+                ws.send(buf);
+            }
+        }, 16);
+
+        window.addEventListener('keydown', (e) => {
+            const k = e.key.toLowerCase();
+            if (k === 'z' || k === 'j') { inputMask |= (1 << 0); e.preventDefault(); }
+            else if (k === 'x' || k === 'k') { inputMask |= (1 << 1); e.preventDefault(); }
+            else if (k === ' ') { inputMask |= (1 << 2); e.preventDefault(); }
+            else if (k === 'enter') { inputMask |= (1 << 3); e.preventDefault(); }
+            else if (k === 'd' || k === 'arrowright') { inputMask |= (1 << 4); e.preventDefault(); }
+            else if (k === 'a' || k === 'arrowleft') { inputMask |= (1 << 5); e.preventDefault(); }
+            else if (k === 'w' || k === 'arrowup') { inputMask |= (1 << 6); e.preventDefault(); }
+            else if (k === 's' || k === 'arrowdown') { inputMask |= (1 << 7); e.preventDefault(); }
+            else if (k === 'e') { inputMask |= (1 << 8); e.preventDefault(); }
+            else if (k === 'q') { inputMask |= (1 << 9); e.preventDefault(); }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            const k = e.key.toLowerCase();
+            if (k === 'z' || k === 'j') { inputMask &= ~(1 << 0); e.preventDefault(); }
+            else if (k === 'x' || k === 'k') { inputMask &= ~(1 << 1); e.preventDefault(); }
+            else if (k === ' ') { inputMask &= ~(1 << 2); e.preventDefault(); }
+            else if (k === 'enter') { inputMask &= ~(1 << 3); e.preventDefault(); }
+            else if (k === 'd' || k === 'arrowright') { inputMask &= ~(1 << 4); e.preventDefault(); }
+            else if (k === 'a' || k === 'arrowleft') { inputMask &= ~(1 << 5); e.preventDefault(); }
+            else if (k === 'w' || k === 'arrowup') { inputMask &= ~(1 << 6); e.preventDefault(); }
+            else if (k === 's' || k === 'arrowdown') { inputMask &= ~(1 << 7); e.preventDefault(); }
+            else if (k === 'e') { inputMask &= ~(1 << 8); e.preventDefault(); }
+            else if (k === 'q') { inputMask &= ~(1 << 9); e.preventDefault(); }
+        });
+
+        ws.onmessage = (event) => {
+            const now = performance.now();
+            const bytes = new Uint8Array(event.data);
+            if (frameQueue.length >= 2) {
+                frameQueue.shift();
+            }
+            frameQueue.push({ bytes: bytes, targetTime: now + BUFFER_DELAY_MS });
+        };
+
+        function renderLoop() {
+            const now = performance.now();
+            if (frameQueue.length > 0 && (now >= frameQueue[0].targetTime || frameQueue.length >= 2)) {
+                if (!isReady) {
+                    isReady = true;
+                    const overlay = document.getElementById('loadingOverlay');
+                    if (overlay) {
+                        overlay.style.opacity = '0';
+                        setTimeout(() => { overlay.style.visibility = 'hidden'; }, 200);
+                    }
+                }
+
+                const t0 = performance.now();
+                const item = frameQueue.shift();
+                const bytes = item.bytes;
+
+                const hostSimUs = (bytes[12] | (bytes[13] << 8) | (bytes[14] << 16) | (bytes[15] << 24));
+                const hostEncUs = (bytes[20] | (bytes[21] << 8) | (bytes[22] << 16) | (bytes[23] << 24));
+                const hostTotalMs = (hostSimUs + hostEncUs) / 1000.0;
+
+                const flag = bytes[32];
+                const payload = bytes.subarray(33);
+
+                if (flag === 4) {
+                    const decomp = lz4Decompress(payload, 2 + 32 + 19200);
+                    const palLen = decomp[0] | (decomp[1] << 8);
+                    const pal16 = new Uint16Array(decomp.buffer, decomp.byteOffset + 2, palLen);
+                    const packed = decomp.subarray(2 + palLen * 2);
+
+                    for (let i = 0; i < 19200; i++) {
+                        const b = packed[i];
+                        const p0 = pal16[b & 0x0F];
+                        const p1 = pal16[(b >> 4) & 0x0F];
+
+                        const r0 = ((p0 & 0x7C00) >> 10) * 255 / 31;
+                        const g0 = ((p0 & 0x03E0) >> 5) * 255 / 31;
+                        const b0 = (p0 & 0x001F) * 255 / 31;
+                        data32[i * 2] = (255 << 24) | (b0 << 16) | (g0 << 8) | r0;
+
+                        const r1 = ((p1 & 0x7C00) >> 10) * 255 / 31;
+                        const g1 = ((p1 & 0x03E0) >> 5) * 255 / 31;
+                        const b1 = (p1 & 0x001F) * 255 / 31;
+                        data32[i * 2 + 1] = (255 << 24) | (b1 << 16) | (g1 << 8) | r1;
+                    }
+                } else if (flag === 2) {
+                    const decomp = lz4Decompress(payload, 2 + 512 + 38400);
+                    const palLen = decomp[0] | (decomp[1] << 8);
+                    const pal16 = new Uint16Array(decomp.buffer, decomp.byteOffset + 2, palLen);
+                    const indices = decomp.subarray(2 + palLen * 2);
+
+                    for (let i = 0; i < 38400; i++) {
+                        const p16 = pal16[indices[i]];
+                        const r = ((p16 & 0x7C00) >> 10) * 255 / 31;
+                        const g = ((p16 & 0x03E0) >> 5) * 255 / 31;
+                        const b = (p16 & 0x001F) * 255 / 31;
+                        data32[i] = (255 << 24) | (b << 16) | (g << 8) | r;
+                    }
+                } else if (flag === 1) {
+                    const raw = lz4Decompress(payload, 38400 * 2);
+                    const src16 = new Uint16Array(raw.buffer, raw.byteOffset, 38400);
+                    for (let i = 0; i < 38400; i++) {
+                        const p16 = src16[i];
+                        const r = ((p16 & 0x7C00) >> 10) * 255 / 31;
+                        const g = ((p16 & 0x03E0) >> 5) * 255 / 31;
+                        const b = (p16 & 0x001F) * 255 / 31;
+                        data32[i] = (255 << 24) | (b << 16) | (g << 8) | r;
+                    }
+                }
+
+                ctx.putImageData(imgData, 0, 0);
+                const t1 = performance.now();
+
+                const clientDur = t1 - t0;
+                decompTimes.push(clientDur);
+                frameCount++;
+
+                if (frameCount % 30 === 0) {
+                    const now = performance.now();
+                    const fps = (30 / ((now - lastTime) / 1000)).toFixed(1);
+                    lastTime = now;
+                    const avgClient = decompTimes.reduce((a,b)=>a+b,0)/decompTimes.length;
+                    const totalM2P = networkRtt + hostTotalMs + avgClient + 8.37 + BUFFER_DELAY_MS;
+
+                    totalEl.innerText = totalM2P.toFixed(1) + ' ms';
+                    netEl.innerText = networkRtt.toFixed(1) + ' ms';
+                    hostEl.innerText = hostTotalMs.toFixed(2) + ' ms';
+                    clientEl.innerText = avgClient.toFixed(2) + ' ms';
+                    fpsEl.innerText = fps;
+                    decompTimes = [];
+                }
+            }
+            requestAnimationFrame(renderLoop);
+        }
+        requestAnimationFrame(renderLoop);
+    </script>
+</body>
+</html>
