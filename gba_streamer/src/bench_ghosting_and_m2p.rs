@@ -20,6 +20,7 @@ async fn main() -> Result<()> {
 
     let mut m2p_latencies = Vec::with_capacity(total_frames);
     let mut inter_frame_intervals = Vec::with_capacity(total_frames);
+    let mut frame_bytes = Vec::with_capacity(total_frames);
     let mut input_history: HashMap<u32, Instant> = HashMap::new();
     let mut last_frame_recv = Instant::now();
     let mut screen_buffer = vec![0u16; GBA_WIDTH * GBA_HEIGHT];
@@ -28,7 +29,7 @@ async fn main() -> Result<()> {
     let mut clean_frames = 0;
 
     println!("===================================================================");
-    println!(" ⚡ VISUAL GHOSTING & M2P BENCHMARK (2,000 FRAMES) ");
+    println!(" ⚡ VISUAL GHOSTING & M2P BENCHMARK (DYNAMIC PALETTE 2,000 FRAMES) ");
     println!("===================================================================");
 
     for frame_idx in 0..total_frames as u32 {
@@ -53,7 +54,6 @@ async fn main() -> Result<()> {
 
         write.send(Message::Binary(input_packet.into())).await?;
 
-        // Read newest available frame
         if let Some(Ok(Message::Binary(bytes))) = read.next().await {
             let t_recv = Instant::now();
 
@@ -63,27 +63,49 @@ async fn main() -> Result<()> {
             }
             last_frame_recv = t_recv;
 
-            if bytes.len() >= 32 {
+            if bytes.len() >= 33 {
                 let matched_seq = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
-                let compressed = &bytes[32..];
+                let flag = bytes[32];
+                let payload = &bytes[33..];
 
-                if let Ok(decomp) = lz4_flex::decompress_size_prepended(compressed) {
-                    if decomp.len() == GBA_WIDTH * GBA_HEIGHT * 2 {
-                        let src16 = unsafe {
-                            std::slice::from_raw_parts(decomp.as_ptr() as *const u16, decomp.len() / 2)
+                if flag == 2 {
+                    if let Ok(decomp) = lz4_flex::decompress_size_prepended(payload) {
+                        let pal_len = u16::from_le_bytes(decomp[0..2].try_into().unwrap()) as usize;
+                        let pal_src = unsafe {
+                            std::slice::from_raw_parts(decomp[2..2 + pal_len * 2].as_ptr() as *const u16, pal_len)
                         };
-                        screen_buffer.copy_from_slice(src16);
-                        clean_frames += 1;
+                        let indices = &decomp[2 + pal_len * 2..];
+                        if indices.len() >= GBA_WIDTH * GBA_HEIGHT {
+                            for i in 0..GBA_WIDTH * GBA_HEIGHT {
+                                screen_buffer[i] = pal_src[indices[i] as usize];
+                            }
+                            clean_frames += 1;
+                        } else {
+                            corrupt_frames += 1;
+                        }
                     } else {
                         corrupt_frames += 1;
                     }
-                } else {
-                    corrupt_frames += 1;
+                } else if flag == 1 {
+                    if let Ok(decomp) = lz4_flex::decompress_size_prepended(payload) {
+                        if decomp.len() == GBA_WIDTH * GBA_HEIGHT * 2 {
+                            let src16 = unsafe {
+                                std::slice::from_raw_parts(decomp.as_ptr() as *const u16, decomp.len() / 2)
+                            };
+                            screen_buffer.copy_from_slice(src16);
+                            clean_frames += 1;
+                        } else {
+                            corrupt_frames += 1;
+                        }
+                    } else {
+                        corrupt_frames += 1;
+                    }
                 }
 
                 if let Some(t_sent) = input_history.get(&matched_seq) {
                     let total_m2p_ms = t_sent.elapsed().as_micros() as f64 / 1000.0;
                     if frame_idx > warmup_frames as u32 {
+                        frame_bytes.push(payload.len());
                         m2p_latencies.push(total_m2p_ms);
                     }
                 }
@@ -117,12 +139,16 @@ async fn main() -> Result<()> {
     let total_eval = clean_frames + corrupt_frames;
     let ghosting_rate = if total_eval > 0 { (corrupt_frames as f64 / total_eval as f64) * 100.0 } else { 0.0 };
 
+    let avg_bytes = if !frame_bytes.is_empty() { frame_bytes.iter().sum::<usize>() as f64 / frame_bytes.len() as f64 } else { 0.0 };
+    let mbps_60 = (avg_bytes * 8.0 * 60.0) / 1_000_000.0;
+
     println!("\n===================================================================");
-    println!("  BENCHMARK RESULTS (CURRENT SERVER STATE) ");
+    println!("  LIVE DYNAMIC PALETTE BENCHMARK RESULTS (2,000 FRAMES) ");
     println!("===================================================================");
     println!("  Evaluated Frames:                 {}", valid_count);
     println!("  Delivered Framerate:              {:.1} FPS", avg_fps);
     println!("  Frame Pacing Jitter:              {:.2} ms", jitter_std);
+    println!("  Average Frame Size:               {:.2} KB ({:.2} Mbps @ 60 FPS)", avg_bytes / 1024.0, mbps_60);
     println!("  Mean M2P Latency:                 {:.2} ms", avg_m2p);
     println!("  P50 (Median) M2P:                 {:.2} ms", p50_m2p);
     println!("  P95 M2P (Tail):                   {:.2} ms", p95_m2p);

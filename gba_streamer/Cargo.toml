@@ -64,3 +64,7 @@ path = "src/bench_gba_domain_codecs.rs"
 [[bin]]
 name = "bench_real_gba_codecs"
 path = "src/bench_real_gba_codecs.rs"
+
+[[bin]]
+name = "bench_ab_scorecard"
+path = "src/bench_ab_scorecard.rs"

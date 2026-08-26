@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use libloading::{Library, Symbol};
+use std::collections::HashMap;
 use std::ffi::{c_char, c_uint, c_void, CString};
 use std::fs;
 use std::net::UdpSocket;
@@ -14,6 +15,8 @@ use warp::Filter;
 
 const GBA_WIDTH: usize = 240;
 const GBA_HEIGHT: usize = 160;
+const TOTAL_PIXELS: usize = GBA_WIDTH * GBA_HEIGHT; // 38,400
+
 const RETRO_DEVICE_JOYPAD: c_uint = 1;
 const RETRO_DEVICE_ID_JOYPAD_B: c_uint = 0;
 const RETRO_DEVICE_ID_JOYPAD_SELECT: c_uint = 2;
@@ -105,7 +108,7 @@ unsafe extern "C" fn environment_callback(cmd: c_uint, data: *mut c_void) -> boo
 const BROWSER_HTML: &str = r#"<!DOCTYPE html>
 <html>
 <head>
-    <title>⚡ Zero-Backlog Full-Frame GBA Streamer</title>
+    <title>⚡ Dynamic 8-Bit Palette GBA Streamer</title>
     <style>
         body { margin: 0; background: #09090b; color: #f4f4f5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; overflow: hidden; }
         h1 { margin: 0 0 8px 0; font-size: 22px; color: #22c55e; letter-spacing: -0.5px; }
@@ -161,14 +164,14 @@ const BROWSER_HTML: &str = r#"<!DOCTYPE html>
 </head>
 <body>
     <div class="main-container">
-        <h1>⚡ Zero-Backlog Full-Frame GBA Streamer</h1>
+        <h1>⚡ GBA Dynamic Palette Streamer (Bit-Exact Lossless)</h1>
         
         <div class="canvas-wrapper">
             <canvas id="gbaCanvas" width="240" height="160"></canvas>
             <div id="loadingOverlay">
                 <div class="spinner"></div>
                 <div class="load-title">⚡ Connecting to GBA Stream...</div>
-                <div class="load-sub" id="connStatus">Receiving full 16-bit frame buffer</div>
+                <div class="load-sub" id="connStatus">Receiving 8-bit dynamic palette frame buffer</div>
             </div>
         </div>
 
@@ -184,13 +187,13 @@ const BROWSER_HTML: &str = r#"<!DOCTYPE html>
             </div>
             <div class="divider"></div>
             <div class="hud-item">
-                <span class="hud-label">Host Sim+LZ4</span>
-                <span class="hud-value" id="hostLatency">0.80 ms</span>
+                <span class="hud-label">Host Palette+LZ4</span>
+                <span class="hud-value" id="hostLatency">0.34 ms</span>
             </div>
             <div class="divider"></div>
             <div class="hud-item">
                 <span class="hud-label">Client Decode</span>
-                <span class="hud-value" id="clientLatency">0.05 ms</span>
+                <span class="hud-value" id="clientLatency">0.06 ms</span>
             </div>
             <div class="divider"></div>
             <div class="hud-item">
@@ -340,7 +343,7 @@ const BROWSER_HTML: &str = r#"<!DOCTYPE html>
         };
 
         function renderLoop() {
-            if (latestPacket && latestPacket.length >= 32) {
+            if (latestPacket && latestPacket.length >= 33) {
                 if (!isReady) {
                     isReady = true;
                     const overlay = document.getElementById('loadingOverlay');
@@ -358,17 +361,36 @@ const BROWSER_HTML: &str = r#"<!DOCTYPE html>
                 const hostEncUs = (bytes[20] | (bytes[21] << 8) | (bytes[22] << 16) | (bytes[23] << 24));
                 const hostTotalMs = (hostSimUs + hostEncUs) / 1000.0;
 
-                const compressed = bytes.subarray(32);
-                const raw = lz4Decompress(compressed, 240 * 160 * 2);
-                const src16 = new Uint16Array(raw.buffer, raw.byteOffset, 240 * 160);
+                const flag = bytes[32];
+                const payload = bytes.subarray(33);
 
-                for (let i = 0; i < 240 * 160; i++) {
-                    const p16 = src16[i];
-                    const r = ((p16 & 0x7C00) >> 10) * 255 / 31;
-                    const g = ((p16 & 0x03E0) >> 5) * 255 / 31;
-                    const b = (p16 & 0x001F) * 255 / 31;
-                    data32[i] = (255 << 24) | (b << 16) | (g << 8) | r;
+                if (flag === 2) {
+                    // Dynamic 8-Bit Palette Frame (Bit-Exact Lossless)
+                    const decomp = lz4Decompress(payload, 2 + 512 + 38400);
+                    const palLen = decomp[0] | (decomp[1] << 8);
+                    const pal16 = new Uint16Array(decomp.buffer, decomp.byteOffset + 2, palLen);
+                    const indices = decomp.subarray(2 + palLen * 2);
+
+                    for (let i = 0; i < 38400; i++) {
+                        const p16 = pal16[indices[i]];
+                        const r = ((p16 & 0x7C00) >> 10) * 255 / 31;
+                        const g = ((p16 & 0x03E0) >> 5) * 255 / 31;
+                        const b = (p16 & 0x001F) * 255 / 31;
+                        data32[i] = (255 << 24) | (b << 16) | (g << 8) | r;
+                    }
+                } else if (flag === 1) {
+                    // Raw 16-Bit RGB555 Frame
+                    const raw = lz4Decompress(payload, 38400 * 2);
+                    const src16 = new Uint16Array(raw.buffer, raw.byteOffset, 38400);
+                    for (let i = 0; i < 38400; i++) {
+                        const p16 = src16[i];
+                        const r = ((p16 & 0x7C00) >> 10) * 255 / 31;
+                        const g = ((p16 & 0x03E0) >> 5) * 255 / 31;
+                        const b = (p16 & 0x001F) * 255 / 31;
+                        data32[i] = (255 << 24) | (b << 16) | (g << 8) | r;
+                    }
                 }
+
                 ctx.putImageData(imgData, 0, 0);
                 const t1 = performance.now();
 
@@ -443,7 +465,7 @@ async fn main() -> Result<()> {
             client,
             frames,
         } => {
-            println!("=== Starting GBA Streaming Host (Native Full-Frame UDP) ===");
+            println!("=== Starting GBA Streaming Host (Native Dynamic Palette UDP) ===");
             let lib: &'static Library = Box::leak(Box::new(
                 unsafe { Library::new(&core) }
                     .context(format!("Failed to load core: {}", core))?,
@@ -503,6 +525,11 @@ async fn main() -> Result<()> {
                 let mut client_target = client;
                 let mut frame_idx = 0u64;
 
+                let mut color_map: HashMap<u16, u8> = HashMap::with_capacity(256);
+                let mut pal_table: Vec<u16> = Vec::with_capacity(256);
+                let mut indexed_pixels = vec![0u8; TOTAL_PIXELS];
+                let mut pal_payload = Vec::with_capacity(2 + 512 + TOTAL_PIXELS);
+
                 while frames == 0 || frame_idx < frames {
                     let frame_start = Instant::now();
 
@@ -526,8 +553,35 @@ async fn main() -> Result<()> {
                     let raw_frame = LAST_FRAME_16.lock().unwrap().clone();
                     if !raw_frame.is_empty() {
                         let t_enc = Instant::now();
-                        let byte_slice = std::slice::from_raw_parts(raw_frame.as_ptr() as *const u8, raw_frame.len() * 2);
-                        let payload = lz4_flex::compress_prepend_size(byte_slice);
+                        color_map.clear();
+                        pal_table.clear();
+
+                        let mut fits_palette = true;
+                        for p in 0..TOTAL_PIXELS {
+                            let c = raw_frame[p];
+                            if let Some(&idx) = color_map.get(&c) {
+                                indexed_pixels[p] = idx;
+                            } else if pal_table.len() < 256 {
+                                let idx = pal_table.len() as u8;
+                                color_map.insert(c, idx);
+                                pal_table.push(c);
+                                indexed_pixels[p] = idx;
+                            } else {
+                                fits_palette = false;
+                                break;
+                            }
+                        }
+
+                        let (flag, payload) = if fits_palette {
+                            pal_payload.clear();
+                            pal_payload.extend_from_slice(&(pal_table.len() as u16).to_le_bytes());
+                            for c in &pal_table { pal_payload.extend_from_slice(&c.to_le_bytes()); }
+                            pal_payload.extend_from_slice(&indexed_pixels);
+                            (2u8, lz4_flex::compress_prepend_size(&pal_payload))
+                        } else {
+                            let byte_slice = std::slice::from_raw_parts(raw_frame.as_ptr() as *const u8, raw_frame.len() * 2);
+                            (1u8, lz4_flex::compress_prepend_size(byte_slice))
+                        };
                         let enc_us = t_enc.elapsed().as_micros() as u32;
 
                         let matched_seq = LAST_INPUT_SEQ.load(Ordering::Relaxed);
@@ -546,7 +600,7 @@ async fn main() -> Result<()> {
                             packet.extend_from_slice(&matched_seq.to_le_bytes());
                             packet.extend_from_slice(&sim_us.to_le_bytes());
                             packet.extend_from_slice(&enc_us.to_le_bytes());
-                            packet.push(1u8);
+                            packet.push(flag);
                             packet.extend_from_slice(chunk_data);
 
                             if let Some(ref target) = client_target {
@@ -570,7 +624,7 @@ async fn main() -> Result<()> {
             bind,
             frames: _,
         } => {
-            println!("=== Starting GBA Streaming WebHost (Zero-Backlog Drop Queue) ===");
+            println!("=== Starting GBA Streaming WebHost (Dynamic 8-Bit Palette Drop Queue) ===");
             let lib: &'static Library = Box::leak(Box::new(
                 unsafe { Library::new(&core) }
                     .context(format!("Failed to load core: {}", core))?,
@@ -623,7 +677,6 @@ async fn main() -> Result<()> {
                 };
                 retro_load_game(&info);
 
-                // Zero-Backlog Drop Queue broadcaster
                 let latest_slot: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
                 let notifier = Arc::new(Notify::new());
 
@@ -631,6 +684,11 @@ async fn main() -> Result<()> {
                 let notifier_producer = notifier.clone();
 
                 std::thread::spawn(move || {
+                    let mut color_map: HashMap<u16, u8> = HashMap::with_capacity(256);
+                    let mut pal_table: Vec<u16> = Vec::with_capacity(256);
+                    let mut indexed_pixels = vec![0u8; TOTAL_PIXELS];
+                    let mut pal_payload = Vec::with_capacity(2 + 512 + TOTAL_PIXELS);
+
                     loop {
                         let frame_start = Instant::now();
                         
@@ -641,8 +699,35 @@ async fn main() -> Result<()> {
                         let raw_frame = LAST_FRAME_16.lock().unwrap().clone();
                         if !raw_frame.is_empty() {
                             let t_enc = Instant::now();
-                            let byte_slice = std::slice::from_raw_parts(raw_frame.as_ptr() as *const u8, raw_frame.len() * 2);
-                            let payload = lz4_flex::compress_prepend_size(byte_slice);
+                            color_map.clear();
+                            pal_table.clear();
+
+                            let mut fits_palette = true;
+                            for p in 0..TOTAL_PIXELS {
+                                let c = raw_frame[p];
+                                if let Some(&idx) = color_map.get(&c) {
+                                    indexed_pixels[p] = idx;
+                                } else if pal_table.len() < 256 {
+                                    let idx = pal_table.len() as u8;
+                                    color_map.insert(c, idx);
+                                    pal_table.push(c);
+                                    indexed_pixels[p] = idx;
+                                } else {
+                                    fits_palette = false;
+                                    break;
+                                }
+                            }
+
+                            let (flag, payload) = if fits_palette {
+                                pal_payload.clear();
+                                pal_payload.extend_from_slice(&(pal_table.len() as u16).to_le_bytes());
+                                for c in &pal_table { pal_payload.extend_from_slice(&c.to_le_bytes()); }
+                                pal_payload.extend_from_slice(&indexed_pixels);
+                                (2u8, lz4_flex::compress_prepend_size(&pal_payload))
+                            } else {
+                                let byte_slice = std::slice::from_raw_parts(raw_frame.as_ptr() as *const u8, raw_frame.len() * 2);
+                                (1u8, lz4_flex::compress_prepend_size(byte_slice))
+                            };
                             let enc_us = t_enc.elapsed().as_micros() as u32;
 
                             let now_us = SystemTime::now()
@@ -653,16 +738,16 @@ async fn main() -> Result<()> {
                             let matched_seq = LAST_INPUT_SEQ.load(Ordering::Relaxed);
                             let matched_t_us = LAST_INPUT_TIMESTAMP_US.load(Ordering::Relaxed);
 
-                            let mut packet = Vec::with_capacity(32 + payload.len());
+                            let mut packet = Vec::with_capacity(33 + payload.len());
                             packet.extend_from_slice(&matched_seq.to_le_bytes());
                             packet.extend_from_slice(&matched_t_us.to_le_bytes());
                             packet.extend_from_slice(&sim_us.to_le_bytes());
                             packet.extend_from_slice(&0u32.to_le_bytes());
                             packet.extend_from_slice(&enc_us.to_le_bytes());
                             packet.extend_from_slice(&now_us.to_le_bytes());
+                            packet.push(flag);
                             packet.extend_from_slice(&payload);
 
-                            // Store only the newest frame, dropping any older unconsumed frame
                             {
                                 let mut guard = slot_producer.lock().unwrap();
                                 *guard = Some(packet);
