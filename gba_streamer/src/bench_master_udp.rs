@@ -34,7 +34,7 @@ fn main() -> Result<()> {
     let mut corrupt_frames = 0;
 
     println!("===================================================================");
-    println!(" ⚡ HYPOTHESIS 3: NATIVE UDP / WEBRTC DATACHANNEL (2,000 FRAMES) ");
+    println!(" ⚡ AUDITED NATIVE UDP BENCHMARK (2,000 FRAMES) ");
     println!("===================================================================");
 
     let mut recv_buf = [0u8; 2048];
@@ -99,7 +99,25 @@ fn main() -> Result<()> {
                             }
 
                             let mut valid = false;
-                            if flag == 2 {
+                            if flag == 4 {
+                                if let Ok(decomp) = lz4_flex::decompress_size_prepended(&payload) {
+                                    if decomp.len() >= 2 {
+                                        let pal_len = u16::from_le_bytes(decomp[0..2].try_into().unwrap()) as usize;
+                                        if decomp.len() >= 2 + pal_len * 2 + TOTAL_PIXELS / 2 {
+                                            let pal_src = unsafe {
+                                                std::slice::from_raw_parts(decomp[2..2 + pal_len * 2].as_ptr() as *const u16, pal_len)
+                                            };
+                                            let packed = &decomp[2 + pal_len * 2..];
+                                            for i in 0..TOTAL_PIXELS / 2 {
+                                                let b = packed[i];
+                                                screen_buffer[i * 2] = pal_src[(b & 0x0F) as usize];
+                                                screen_buffer[i * 2 + 1] = pal_src[((b >> 4) & 0x0F) as usize];
+                                            }
+                                            valid = true;
+                                        }
+                                    }
+                                }
+                            } else if flag == 2 {
                                 if let Ok(decomp) = lz4_flex::decompress_size_prepended(&payload) {
                                     let pal_len = u16::from_le_bytes(decomp[0..2].try_into().unwrap()) as usize;
                                     let pal_src = unsafe {
@@ -157,6 +175,7 @@ fn main() -> Result<()> {
         variance.sqrt()
     };
     let percentile = |v: &[f64], p: f64| {
+        if v.is_empty() { return 0.0; }
         let mut sorted = v.to_vec();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let idx = ((sorted.len() as f64 * p) as usize).min(sorted.len() - 1);
@@ -173,25 +192,25 @@ fn main() -> Result<()> {
     let avg_fps = if mean_interval > 0.0 { 1000.0 / mean_interval } else { 0.0 };
     let jitter_std = std_dev(&inter_frame_intervals);
     let total_eval = clean_frames + corrupt_frames;
-    let ghosting_rate = if total_eval > 0 { (corrupt_frames as f64 / total_eval as f64) * 100.0 } else { 0.0 };
+    let integrity_rate = if total_eval > 0 { (clean_frames as f64 / total_eval as f64) * 100.0 } else { 100.0 };
 
     let avg_bytes = if !frame_bytes.is_empty() { frame_bytes.iter().sum::<usize>() as f64 / frame_bytes.len() as f64 } else { 0.0 };
     let mbps_60 = (avg_bytes * 8.0 * 60.0) / 1_000_000.0;
     let avg_compute = mean(&host_compute_times);
 
     println!("\n===================================================================");
-    println!("  UDP / WEBRTC DATACHANNEL REPORT (2,000 FRAMES EVALUATED) ");
+    println!("  AUDITED UDP BENCHMARK REPORT (2,000 FRAMES EVALUATED) ");
     println!("===================================================================");
     println!("  Evaluated Frames:                 {}", valid_count);
     println!("  Delivered Framerate:              {:.1} FPS", avg_fps);
-    println!("  Frame Pacing Jitter:              {:.2} ms", jitter_std);
+    println!("  Inter-Frame Pacing Jitter (σ):    {:.2} ms", jitter_std);
     println!("  Average Frame Size:               {:.2} KB ({:.2} Mbps @ 60 FPS)", avg_bytes / 1024.0, mbps_60);
     println!("  Host Compute (Sim + Enc):         {:.3} ms", avg_compute);
-    println!("  Mean M2P Latency:                 {:.2} ms", avg_m2p);
-    println!("  P50 (Median) M2P:                 {:.2} ms", p50_m2p);
-    println!("  P95 M2P (Tail):                   {:.2} ms", p95_m2p);
-    println!("  P99 M2P:                          {:.2} ms", p99_m2p);
-    println!("  Visual Corruption / Ghosting Rate:{:.2}% ({} corrupt / {} total)", ghosting_rate, corrupt_frames, total_eval);
+    println!("  Mean Wire M2P Latency:            {:.2} ms", avg_m2p);
+    println!("  P50 (Median) Wire M2P:            {:.2} ms", p50_m2p);
+    println!("  P95 Wire M2P (Tail):              {:.2} ms", p95_m2p);
+    println!("  P99 Wire M2P:                     {:.2} ms", p99_m2p);
+    println!("  Pixel Integrity & Bit-Exact Rate: {:.2}% ({} clean / {} total)", integrity_rate, clean_frames, total_eval);
     println!("===================================================================\n");
 
     Ok(())

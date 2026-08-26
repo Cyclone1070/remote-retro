@@ -9,7 +9,6 @@ use std::net::UdpSocket;
 use std::ptr;
 use std::sync::{atomic::{AtomicI16, AtomicU32, AtomicU64, Ordering}, Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::Notify;
 use warp::ws::Ws;
 use warp::Filter;
 
@@ -108,7 +107,7 @@ unsafe extern "C" fn environment_callback(cmd: c_uint, data: *mut c_void) -> boo
 const BROWSER_HTML: &str = r#"<!DOCTYPE html>
 <html>
 <head>
-    <title>⚡ Adaptive 4/8-Bit Palette GBA Streamer</title>
+    <title>⚡ GBA Streamer (Bit-Exact Dynamic Palette)</title>
     <style>
         body { margin: 0; background: #09090b; color: #f4f4f5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; overflow: hidden; }
         h1 { margin: 0 0 8px 0; font-size: 22px; color: #22c55e; letter-spacing: -0.5px; }
@@ -164,20 +163,20 @@ const BROWSER_HTML: &str = r#"<!DOCTYPE html>
 </head>
 <body>
     <div class="main-container">
-        <h1>⚡ GBA Adaptive Palette Streamer (Bit-Exact Lossless)</h1>
+        <h1>⚡ GBA Streamer (100% Lossless Bit-Exact)</h1>
         
         <div class="canvas-wrapper">
             <canvas id="gbaCanvas" width="240" height="160"></canvas>
             <div id="loadingOverlay">
                 <div class="spinner"></div>
                 <div class="load-title">⚡ Connecting to GBA Stream...</div>
-                <div class="load-sub" id="connStatus">Receiving adaptive palette frame buffer</div>
+                <div class="load-sub" id="connStatus">Initializing presentation pipeline</div>
             </div>
         </div>
 
         <div class="hud-banner">
             <div class="hud-item">
-                <span class="hud-label">Total M2P Lag</span>
+                <span class="hud-label">Est. M2P Lag</span>
                 <span class="hud-value highlight" id="totalLatency">-- ms</span>
             </div>
             <div class="divider"></div>
@@ -277,8 +276,10 @@ const BROWSER_HTML: &str = r#"<!DOCTYPE html>
         let lastTime = performance.now();
         let decompTimes = [];
         let networkRtt = 10.0;
-        let latestPacket = null;
         let isReady = false;
+
+        const BUFFER_DELAY_MS = 8.0;
+        const frameQueue = [];
 
         async function updatePing() {
             const t0 = performance.now();
@@ -339,11 +340,17 @@ const BROWSER_HTML: &str = r#"<!DOCTYPE html>
         });
 
         ws.onmessage = (event) => {
-            latestPacket = new Uint8Array(event.data);
+            const now = performance.now();
+            const bytes = new Uint8Array(event.data);
+            if (frameQueue.length >= 2) {
+                frameQueue.shift();
+            }
+            frameQueue.push({ bytes: bytes, targetTime: now + BUFFER_DELAY_MS });
         };
 
         function renderLoop() {
-            if (latestPacket && latestPacket.length >= 33) {
+            const now = performance.now();
+            if (frameQueue.length > 0 && (now >= frameQueue[0].targetTime || frameQueue.length >= 2)) {
                 if (!isReady) {
                     isReady = true;
                     const overlay = document.getElementById('loadingOverlay');
@@ -354,8 +361,8 @@ const BROWSER_HTML: &str = r#"<!DOCTYPE html>
                 }
 
                 const t0 = performance.now();
-                const bytes = latestPacket;
-                latestPacket = null;
+                const item = frameQueue.shift();
+                const bytes = item.bytes;
 
                 const hostSimUs = (bytes[12] | (bytes[13] << 8) | (bytes[14] << 16) | (bytes[15] << 24));
                 const hostEncUs = (bytes[20] | (bytes[21] << 8) | (bytes[22] << 16) | (bytes[23] << 24));
@@ -422,7 +429,7 @@ const BROWSER_HTML: &str = r#"<!DOCTYPE html>
                     const fps = (30 / ((now - lastTime) / 1000)).toFixed(1);
                     lastTime = now;
                     const avgClient = decompTimes.reduce((a,b)=>a+b,0)/decompTimes.length;
-                    const totalM2P = networkRtt + hostTotalMs + avgClient;
+                    const totalM2P = networkRtt + hostTotalMs + avgClient + 8.37 + BUFFER_DELAY_MS;
 
                     totalEl.innerText = totalM2P.toFixed(1) + ' ms';
                     netEl.innerText = networkRtt.toFixed(1) + ' ms';
@@ -484,7 +491,7 @@ async fn main() -> Result<()> {
             client,
             frames,
         } => {
-            println!("=== Starting GBA Streaming Host (Native Adaptive Palette UDP) ===");
+            println!("=== Starting GBA Streaming Host (Native Adaptive UDP) ===");
             let lib: &'static Library = Box::leak(Box::new(
                 unsafe { Library::new(&core) }
                     .context(format!("Failed to load core: {}", core))?,
@@ -566,6 +573,9 @@ async fn main() -> Result<()> {
                         }
                     }
 
+                    // Snapshot exact input state before simulation to eliminate race condition
+                    let matched_seq = LAST_INPUT_SEQ.load(Ordering::Relaxed);
+
                     let t_sim = Instant::now();
                     retro_run();
                     let sim_us = t_sim.elapsed().as_micros() as u32;
@@ -613,8 +623,6 @@ async fn main() -> Result<()> {
                         };
                         let enc_us = t_enc.elapsed().as_micros() as u32;
 
-                        let matched_seq = LAST_INPUT_SEQ.load(Ordering::Relaxed);
-
                         let chunk_size = 1024usize;
                         let total_chunks = (payload.len() + chunk_size - 1) / chunk_size;
                         for chunk_idx in 0..total_chunks {
@@ -653,7 +661,7 @@ async fn main() -> Result<()> {
             bind,
             frames: _,
         } => {
-            println!("=== Starting GBA Streaming WebHost (Adaptive Palette Engine) ===");
+            println!("=== Starting GBA Streaming WebHost (Lossless Bit-Exact) ===");
             let lib: &'static Library = Box::leak(Box::new(
                 unsafe { Library::new(&core) }
                     .context(format!("Failed to load core: {}", core))?,
@@ -706,13 +714,10 @@ async fn main() -> Result<()> {
                 };
                 retro_load_game(&info);
 
-                let latest_slot: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
-                let frame_notifier = Arc::new(Notify::new());
+                let (tx, _rx) = tokio::sync::broadcast::channel::<Arc<Vec<u8>>>(4);
+                let tx_arc = Arc::new(tx);
+                let tx_producer = tx_arc.clone();
 
-                let slot_producer = latest_slot.clone();
-                let frame_notif_producer = frame_notifier.clone();
-
-                // Stable 59.73 Hz Hardware Clock with Immediate Input Sampling
                 std::thread::spawn(move || {
                     let mut color_map: HashMap<u16, u8> = HashMap::with_capacity(256);
                     let mut pal_table: Vec<u16> = Vec::with_capacity(256);
@@ -722,6 +727,10 @@ async fn main() -> Result<()> {
 
                     loop {
                         let frame_start = Instant::now();
+
+                        // Snapshot exact input state and timestamp before simulation
+                        let matched_seq = LAST_INPUT_SEQ.load(Ordering::Relaxed);
+                        let matched_t_us = LAST_INPUT_TIMESTAMP_US.load(Ordering::Relaxed);
 
                         let t_sim = Instant::now();
                         retro_run();
@@ -775,9 +784,6 @@ async fn main() -> Result<()> {
                                 .unwrap_or_default()
                                 .as_micros() as u64;
 
-                            let matched_seq = LAST_INPUT_SEQ.load(Ordering::Relaxed);
-                            let matched_t_us = LAST_INPUT_TIMESTAMP_US.load(Ordering::Relaxed);
-
                             let mut packet = Vec::with_capacity(33 + payload.len());
                             packet.extend_from_slice(&matched_seq.to_le_bytes());
                             packet.extend_from_slice(&matched_t_us.to_le_bytes());
@@ -788,11 +794,7 @@ async fn main() -> Result<()> {
                             packet.push(flag);
                             packet.extend_from_slice(&payload);
 
-                            {
-                                let mut guard = slot_producer.lock().unwrap();
-                                *guard = Some(packet);
-                            }
-                            frame_notif_producer.notify_waiters();
+                            let _ = tx_producer.send(Arc::new(packet));
                         }
 
                         let frame_budget = Duration::from_micros(16742);
@@ -809,14 +811,12 @@ async fn main() -> Result<()> {
                 let html_route = warp::path::end().map(|| warp::reply::html(BROWSER_HTML));
                 let ping_route = warp::path("ping").map(|| warp::reply::html("pong"));
 
-                let slot_consumer = latest_slot.clone();
-                let frame_notif_consumer = frame_notifier.clone();
+                let tx_for_ws = tx_arc.clone();
 
                 let ws_route = warp::path("ws")
                     .and(warp::ws())
                     .map(move |ws: Ws| {
-                        let slot = slot_consumer.clone();
-                        let frame_notif = frame_notif_consumer.clone();
+                        let mut client_rx = tx_for_ws.subscribe();
 
                         ws.on_upgrade(move |websocket| async move {
                             let (mut ws_sender, mut ws_receiver) = websocket.split();
@@ -841,21 +841,13 @@ async fn main() -> Result<()> {
                                 }
                             });
 
-                            loop {
-                                frame_notif.notified().await;
-                                let maybe_frame = {
-                                    let mut guard = slot.lock().unwrap();
-                                    guard.take()
-                                };
-
-                                if let Some(packet) = maybe_frame {
-                                    if ws_sender
-                                        .send(warp::ws::Message::binary(packet))
-                                        .await
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
+                            while let Ok(packet) = client_rx.recv().await {
+                                if ws_sender
+                                    .send(warp::ws::Message::binary((*packet).clone()))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
                                 }
                             }
                             println!("Client disconnected.");
