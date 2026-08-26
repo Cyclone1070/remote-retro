@@ -7,6 +7,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 const GBA_WIDTH: usize = 240;
 const GBA_HEIGHT: usize = 160;
+const TOTAL_PIXELS: usize = GBA_WIDTH * GBA_HEIGHT;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -21,15 +22,16 @@ async fn main() -> Result<()> {
     let mut m2p_latencies = Vec::with_capacity(total_frames);
     let mut inter_frame_intervals = Vec::with_capacity(total_frames);
     let mut frame_bytes = Vec::with_capacity(total_frames);
+    let mut host_compute_times = Vec::with_capacity(total_frames);
     let mut input_history: HashMap<u32, Instant> = HashMap::new();
     let mut last_frame_recv = Instant::now();
-    let mut screen_buffer = vec![0u16; GBA_WIDTH * GBA_HEIGHT];
+    let mut screen_buffer = vec![0u16; TOTAL_PIXELS];
 
     let mut corrupt_frames = 0;
     let mut clean_frames = 0;
 
     println!("===================================================================");
-    println!(" ⚡ VISUAL GHOSTING & M2P BENCHMARK (DYNAMIC PALETTE 2,000 FRAMES) ");
+    println!(" ⚡ COMPREHENSIVE GHOSTING & M2P BENCHMARK (2,000 FRAMES) ");
     println!("===================================================================");
 
     for frame_idx in 0..total_frames as u32 {
@@ -65,41 +67,64 @@ async fn main() -> Result<()> {
 
             if bytes.len() >= 33 {
                 let matched_seq = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+                let sim_us = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+                let enc_us = u32::from_le_bytes(bytes[20..24].try_into().unwrap());
                 let flag = bytes[32];
                 let payload = &bytes[33..];
 
-                if flag == 2 {
+                let mut frame_valid = false;
+
+                if flag == 4 {
+                    // 4-Bit Packed Palette Frame (<= 16 colors)
+                    if let Ok(decomp) = lz4_flex::decompress_size_prepended(payload) {
+                        let pal_len = u16::from_le_bytes(decomp[0..2].try_into().unwrap()) as usize;
+                        let pal_src = unsafe {
+                            std::slice::from_raw_parts(decomp[2..2 + pal_len * 2].as_ptr() as *const u16, pal_len)
+                        };
+                        let packed = &decomp[2 + pal_len * 2..];
+                        if packed.len() >= TOTAL_PIXELS / 2 {
+                            for i in 0..TOTAL_PIXELS / 2 {
+                                let b = packed[i];
+                                let idx0 = (b & 0x0F) as usize;
+                                let idx1 = ((b >> 4) & 0x0F) as usize;
+                                screen_buffer[i * 2] = pal_src[idx0];
+                                screen_buffer[i * 2 + 1] = pal_src[idx1];
+                            }
+                            frame_valid = true;
+                        }
+                    }
+                } else if flag == 2 {
+                    // 8-Bit Dynamic Palette Frame (<= 256 colors)
                     if let Ok(decomp) = lz4_flex::decompress_size_prepended(payload) {
                         let pal_len = u16::from_le_bytes(decomp[0..2].try_into().unwrap()) as usize;
                         let pal_src = unsafe {
                             std::slice::from_raw_parts(decomp[2..2 + pal_len * 2].as_ptr() as *const u16, pal_len)
                         };
                         let indices = &decomp[2 + pal_len * 2..];
-                        if indices.len() >= GBA_WIDTH * GBA_HEIGHT {
-                            for i in 0..GBA_WIDTH * GBA_HEIGHT {
+                        if indices.len() >= TOTAL_PIXELS {
+                            for i in 0..TOTAL_PIXELS {
                                 screen_buffer[i] = pal_src[indices[i] as usize];
                             }
-                            clean_frames += 1;
-                        } else {
-                            corrupt_frames += 1;
+                            frame_valid = true;
                         }
-                    } else {
-                        corrupt_frames += 1;
                     }
                 } else if flag == 1 {
+                    // Raw 16-Bit RGB555 Frame
                     if let Ok(decomp) = lz4_flex::decompress_size_prepended(payload) {
-                        if decomp.len() == GBA_WIDTH * GBA_HEIGHT * 2 {
+                        if decomp.len() == TOTAL_PIXELS * 2 {
                             let src16 = unsafe {
                                 std::slice::from_raw_parts(decomp.as_ptr() as *const u16, decomp.len() / 2)
                             };
                             screen_buffer.copy_from_slice(src16);
-                            clean_frames += 1;
-                        } else {
-                            corrupt_frames += 1;
+                            frame_valid = true;
                         }
-                    } else {
-                        corrupt_frames += 1;
                     }
+                }
+
+                if frame_valid {
+                    clean_frames += 1;
+                } else {
+                    corrupt_frames += 1;
                 }
 
                 if let Some(t_sent) = input_history.get(&matched_seq) {
@@ -107,6 +132,7 @@ async fn main() -> Result<()> {
                     if frame_idx > warmup_frames as u32 {
                         frame_bytes.push(payload.len());
                         m2p_latencies.push(total_m2p_ms);
+                        host_compute_times.push((sim_us + enc_us) as f64 / 1000.0);
                     }
                 }
             }
@@ -127,7 +153,7 @@ async fn main() -> Result<()> {
         sorted[idx]
     };
 
-    let valid_count = m2p_latencies.len();
+    let _valid_count = m2p_latencies.len();
     let avg_m2p = mean(&m2p_latencies);
     let p50_m2p = percentile(&m2p_latencies, 0.50);
     let p95_m2p = percentile(&m2p_latencies, 0.95);
@@ -141,14 +167,15 @@ async fn main() -> Result<()> {
 
     let avg_bytes = if !frame_bytes.is_empty() { frame_bytes.iter().sum::<usize>() as f64 / frame_bytes.len() as f64 } else { 0.0 };
     let mbps_60 = (avg_bytes * 8.0 * 60.0) / 1_000_000.0;
+    let avg_compute = mean(&host_compute_times);
 
     println!("\n===================================================================");
-    println!("  LIVE DYNAMIC PALETTE BENCHMARK RESULTS (2,000 FRAMES) ");
+    println!("  BENCHMARK REPORT (2,000 FRAMES EVALUATED) ");
     println!("===================================================================");
-    println!("  Evaluated Frames:                 {}", valid_count);
     println!("  Delivered Framerate:              {:.1} FPS", avg_fps);
     println!("  Frame Pacing Jitter:              {:.2} ms", jitter_std);
     println!("  Average Frame Size:               {:.2} KB ({:.2} Mbps @ 60 FPS)", avg_bytes / 1024.0, mbps_60);
+    println!("  Host Compute (Sim + Enc):         {:.3} ms", avg_compute);
     println!("  Mean M2P Latency:                 {:.2} ms", avg_m2p);
     println!("  P50 (Median) M2P:                 {:.2} ms", p50_m2p);
     println!("  P95 M2P (Tail):                   {:.2} ms", p95_m2p);

@@ -68,3 +68,11 @@ path = "src/bench_real_gba_codecs.rs"
 [[bin]]
 name = "bench_ab_scorecard"
 path = "src/bench_ab_scorecard.rs"
+
+[[bin]]
+name = "bench_anguna_colors"
+path = "src/bench_anguna_colors.rs"
+
+[[bin]]
+name = "bench_16color_gain"
+path = "src/bench_16color_gain.rs"

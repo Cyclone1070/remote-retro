@@ -15,7 +15,7 @@ use warp::Filter;
 
 const GBA_WIDTH: usize = 240;
 const GBA_HEIGHT: usize = 160;
-const TOTAL_PIXELS: usize = GBA_WIDTH * GBA_HEIGHT; // 38,400
+const TOTAL_PIXELS: usize = GBA_WIDTH * GBA_HEIGHT;
 
 const RETRO_DEVICE_JOYPAD: c_uint = 1;
 const RETRO_DEVICE_ID_JOYPAD_B: c_uint = 0;
@@ -108,7 +108,7 @@ unsafe extern "C" fn environment_callback(cmd: c_uint, data: *mut c_void) -> boo
 const BROWSER_HTML: &str = r#"<!DOCTYPE html>
 <html>
 <head>
-    <title>⚡ Dynamic 8-Bit Palette GBA Streamer</title>
+    <title>⚡ Adaptive 4/8-Bit Palette GBA Streamer</title>
     <style>
         body { margin: 0; background: #09090b; color: #f4f4f5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; overflow: hidden; }
         h1 { margin: 0 0 8px 0; font-size: 22px; color: #22c55e; letter-spacing: -0.5px; }
@@ -164,14 +164,14 @@ const BROWSER_HTML: &str = r#"<!DOCTYPE html>
 </head>
 <body>
     <div class="main-container">
-        <h1>⚡ GBA Dynamic Palette Streamer (Bit-Exact Lossless)</h1>
+        <h1>⚡ GBA Adaptive Palette Streamer (Bit-Exact Lossless)</h1>
         
         <div class="canvas-wrapper">
             <canvas id="gbaCanvas" width="240" height="160"></canvas>
             <div id="loadingOverlay">
                 <div class="spinner"></div>
                 <div class="load-title">⚡ Connecting to GBA Stream...</div>
-                <div class="load-sub" id="connStatus">Receiving 8-bit dynamic palette frame buffer</div>
+                <div class="load-sub" id="connStatus">Receiving adaptive palette frame buffer</div>
             </div>
         </div>
 
@@ -187,13 +187,13 @@ const BROWSER_HTML: &str = r#"<!DOCTYPE html>
             </div>
             <div class="divider"></div>
             <div class="hud-item">
-                <span class="hud-label">Host Palette+LZ4</span>
+                <span class="hud-label">Host Compute</span>
                 <span class="hud-value" id="hostLatency">0.34 ms</span>
             </div>
             <div class="divider"></div>
             <div class="hud-item">
                 <span class="hud-label">Client Decode</span>
-                <span class="hud-value" id="clientLatency">0.06 ms</span>
+                <span class="hud-value" id="clientLatency">0.05 ms</span>
             </div>
             <div class="divider"></div>
             <div class="hud-item">
@@ -364,8 +364,28 @@ const BROWSER_HTML: &str = r#"<!DOCTYPE html>
                 const flag = bytes[32];
                 const payload = bytes.subarray(33);
 
-                if (flag === 2) {
-                    // Dynamic 8-Bit Palette Frame (Bit-Exact Lossless)
+                if (flag === 4) {
+                    const decomp = lz4Decompress(payload, 2 + 32 + 19200);
+                    const palLen = decomp[0] | (decomp[1] << 8);
+                    const pal16 = new Uint16Array(decomp.buffer, decomp.byteOffset + 2, palLen);
+                    const packed = decomp.subarray(2 + palLen * 2);
+
+                    for (let i = 0; i < 19200; i++) {
+                        const b = packed[i];
+                        const p0 = pal16[b & 0x0F];
+                        const p1 = pal16[(b >> 4) & 0x0F];
+
+                        const r0 = ((p0 & 0x7C00) >> 10) * 255 / 31;
+                        const g0 = ((p0 & 0x03E0) >> 5) * 255 / 31;
+                        const b0 = (p0 & 0x001F) * 255 / 31;
+                        data32[i * 2] = (255 << 24) | (b0 << 16) | (g0 << 8) | r0;
+
+                        const r1 = ((p1 & 0x7C00) >> 10) * 255 / 31;
+                        const g1 = ((p1 & 0x03E0) >> 5) * 255 / 31;
+                        const b1 = (p1 & 0x001F) * 255 / 31;
+                        data32[i * 2 + 1] = (255 << 24) | (b1 << 16) | (g1 << 8) | r1;
+                    }
+                } else if (flag === 2) {
                     const decomp = lz4Decompress(payload, 2 + 512 + 38400);
                     const palLen = decomp[0] | (decomp[1] << 8);
                     const pal16 = new Uint16Array(decomp.buffer, decomp.byteOffset + 2, palLen);
@@ -379,7 +399,6 @@ const BROWSER_HTML: &str = r#"<!DOCTYPE html>
                         data32[i] = (255 << 24) | (b << 16) | (g << 8) | r;
                     }
                 } else if (flag === 1) {
-                    // Raw 16-Bit RGB555 Frame
                     const raw = lz4Decompress(payload, 38400 * 2);
                     const src16 = new Uint16Array(raw.buffer, raw.byteOffset, 38400);
                     for (let i = 0; i < 38400; i++) {
@@ -465,7 +484,7 @@ async fn main() -> Result<()> {
             client,
             frames,
         } => {
-            println!("=== Starting GBA Streaming Host (Native Dynamic Palette UDP) ===");
+            println!("=== Starting GBA Streaming Host (Native Adaptive Palette UDP) ===");
             let lib: &'static Library = Box::leak(Box::new(
                 unsafe { Library::new(&core) }
                     .context(format!("Failed to load core: {}", core))?,
@@ -528,6 +547,7 @@ async fn main() -> Result<()> {
                 let mut color_map: HashMap<u16, u8> = HashMap::with_capacity(256);
                 let mut pal_table: Vec<u16> = Vec::with_capacity(256);
                 let mut indexed_pixels = vec![0u8; TOTAL_PIXELS];
+                let mut nibble_packed = vec![0u8; TOTAL_PIXELS / 2];
                 let mut pal_payload = Vec::with_capacity(2 + 512 + TOTAL_PIXELS);
 
                 while frames == 0 || frame_idx < frames {
@@ -556,7 +576,7 @@ async fn main() -> Result<()> {
                         color_map.clear();
                         pal_table.clear();
 
-                        let mut fits_palette = true;
+                        let mut fits_256 = true;
                         for p in 0..TOTAL_PIXELS {
                             let c = raw_frame[p];
                             if let Some(&idx) = color_map.get(&c) {
@@ -567,12 +587,21 @@ async fn main() -> Result<()> {
                                 pal_table.push(c);
                                 indexed_pixels[p] = idx;
                             } else {
-                                fits_palette = false;
+                                fits_256 = false;
                                 break;
                             }
                         }
 
-                        let (flag, payload) = if fits_palette {
+                        let (flag, payload) = if fits_256 && pal_table.len() <= 16 {
+                            for i in 0..TOTAL_PIXELS / 2 {
+                                nibble_packed[i] = (indexed_pixels[i * 2] & 0x0F) | ((indexed_pixels[i * 2 + 1] & 0x0F) << 4);
+                            }
+                            pal_payload.clear();
+                            pal_payload.extend_from_slice(&(pal_table.len() as u16).to_le_bytes());
+                            for c in &pal_table { pal_payload.extend_from_slice(&c.to_le_bytes()); }
+                            pal_payload.extend_from_slice(&nibble_packed);
+                            (4u8, lz4_flex::compress_prepend_size(&pal_payload))
+                        } else if fits_256 {
                             pal_payload.clear();
                             pal_payload.extend_from_slice(&(pal_table.len() as u16).to_le_bytes());
                             for c in &pal_table { pal_payload.extend_from_slice(&c.to_le_bytes()); }
@@ -624,7 +653,7 @@ async fn main() -> Result<()> {
             bind,
             frames: _,
         } => {
-            println!("=== Starting GBA Streaming WebHost (Dynamic 8-Bit Palette Drop Queue) ===");
+            println!("=== Starting GBA Streaming WebHost (Adaptive Palette Engine) ===");
             let lib: &'static Library = Box::leak(Box::new(
                 unsafe { Library::new(&core) }
                     .context(format!("Failed to load core: {}", core))?,
@@ -678,20 +707,22 @@ async fn main() -> Result<()> {
                 retro_load_game(&info);
 
                 let latest_slot: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
-                let notifier = Arc::new(Notify::new());
+                let frame_notifier = Arc::new(Notify::new());
 
                 let slot_producer = latest_slot.clone();
-                let notifier_producer = notifier.clone();
+                let frame_notif_producer = frame_notifier.clone();
 
+                // Stable 59.73 Hz Hardware Clock with Immediate Input Sampling
                 std::thread::spawn(move || {
                     let mut color_map: HashMap<u16, u8> = HashMap::with_capacity(256);
                     let mut pal_table: Vec<u16> = Vec::with_capacity(256);
                     let mut indexed_pixels = vec![0u8; TOTAL_PIXELS];
+                    let mut nibble_packed = vec![0u8; TOTAL_PIXELS / 2];
                     let mut pal_payload = Vec::with_capacity(2 + 512 + TOTAL_PIXELS);
 
                     loop {
                         let frame_start = Instant::now();
-                        
+
                         let t_sim = Instant::now();
                         retro_run();
                         let sim_us = t_sim.elapsed().as_micros() as u32;
@@ -702,7 +733,7 @@ async fn main() -> Result<()> {
                             color_map.clear();
                             pal_table.clear();
 
-                            let mut fits_palette = true;
+                            let mut fits_256 = true;
                             for p in 0..TOTAL_PIXELS {
                                 let c = raw_frame[p];
                                 if let Some(&idx) = color_map.get(&c) {
@@ -713,12 +744,21 @@ async fn main() -> Result<()> {
                                     pal_table.push(c);
                                     indexed_pixels[p] = idx;
                                 } else {
-                                    fits_palette = false;
+                                    fits_256 = false;
                                     break;
                                 }
                             }
 
-                            let (flag, payload) = if fits_palette {
+                            let (flag, payload) = if fits_256 && pal_table.len() <= 16 {
+                                for i in 0..TOTAL_PIXELS / 2 {
+                                    nibble_packed[i] = (indexed_pixels[i * 2] & 0x0F) | ((indexed_pixels[i * 2 + 1] & 0x0F) << 4);
+                                }
+                                pal_payload.clear();
+                                pal_payload.extend_from_slice(&(pal_table.len() as u16).to_le_bytes());
+                                for c in &pal_table { pal_payload.extend_from_slice(&c.to_le_bytes()); }
+                                pal_payload.extend_from_slice(&nibble_packed);
+                                (4u8, lz4_flex::compress_prepend_size(&pal_payload))
+                            } else if fits_256 {
                                 pal_payload.clear();
                                 pal_payload.extend_from_slice(&(pal_table.len() as u16).to_le_bytes());
                                 for c in &pal_table { pal_payload.extend_from_slice(&c.to_le_bytes()); }
@@ -752,7 +792,7 @@ async fn main() -> Result<()> {
                                 let mut guard = slot_producer.lock().unwrap();
                                 *guard = Some(packet);
                             }
-                            notifier_producer.notify_waiters();
+                            frame_notif_producer.notify_waiters();
                         }
 
                         let frame_budget = Duration::from_micros(16742);
@@ -770,13 +810,13 @@ async fn main() -> Result<()> {
                 let ping_route = warp::path("ping").map(|| warp::reply::html("pong"));
 
                 let slot_consumer = latest_slot.clone();
-                let notifier_consumer = notifier.clone();
+                let frame_notif_consumer = frame_notifier.clone();
 
                 let ws_route = warp::path("ws")
                     .and(warp::ws())
                     .map(move |ws: Ws| {
                         let slot = slot_consumer.clone();
-                        let notif = notifier_consumer.clone();
+                        let frame_notif = frame_notif_consumer.clone();
 
                         ws.on_upgrade(move |websocket| async move {
                             let (mut ws_sender, mut ws_receiver) = websocket.split();
@@ -802,7 +842,7 @@ async fn main() -> Result<()> {
                             });
 
                             loop {
-                                notif.notified().await;
+                                frame_notif.notified().await;
                                 let maybe_frame = {
                                     let mut guard = slot.lock().unwrap();
                                     guard.take()
