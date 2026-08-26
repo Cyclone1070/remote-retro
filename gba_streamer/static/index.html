@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>⚡ GBA Streamer (Lossless Video + Crystal Audio)</title>
+    <title>⚡ GBA Streamer (Zero-Lag Native Feel)</title>
     <style>
         body { margin: 0; background: #09090b; color: #f4f4f5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; overflow: hidden; }
         h1 { margin: 0 0 8px 0; font-size: 22px; color: #22c55e; letter-spacing: -0.5px; }
@@ -57,14 +57,14 @@
 </head>
 <body>
     <div class="main-container">
-        <h1>⚡ GBA Streamer (Lossless Video + Crystal Audio)</h1>
+        <h1>⚡ GBA Streamer (Zero-Lag Native Feel)</h1>
         
         <div class="canvas-wrapper" id="canvasWrapper">
             <canvas id="gbaCanvas" width="240" height="160"></canvas>
             <div id="loadingOverlay">
                 <div class="spinner"></div>
                 <div class="load-title">⚡ Connecting to GBA Stream...</div>
-                <div class="load-sub" id="connStatus">Initializing presentation pipeline</div>
+                <div class="load-sub" id="connStatus">Initializing zero-lag presentation pipeline</div>
             </div>
         </div>
 
@@ -160,10 +160,10 @@
         const fpsEl = document.getElementById('fpsVal');
 
         // ==========================================
-        // Proportional Phase-Locked Audio Streamer
+        // Continuous Linear-Resampled Audio Ring
         // ==========================================
         const GBA_SAMPLE_RATE = 32768;
-        const TARGET_CUSHION_SAMPLES = 850; // ~25.9 ms target cushion
+        const TARGET_CUSHION_SAMPLES = 850; // ~25.9 ms cushion
         const RING_SIZE = 65536;
         const ringBufL = new Float32Array(RING_SIZE);
         const ringBufR = new Float32Array(RING_SIZE);
@@ -171,7 +171,8 @@
         let readPos = 0;
 
         window.audioCtx = null;
-        window.scriptNode = null;
+        window.audioMasterGain = null;
+
         window.getAudioQueueLength = function() {
             let len = writePos - Math.floor(readPos);
             if (len < 0) len += RING_SIZE;
@@ -184,32 +185,33 @@
                 const outSampleRate = window.audioCtx.sampleRate;
                 const bufferSize = 512;
                 
-                window.scriptNode = window.audioCtx.createScriptProcessor(bufferSize, 1, 2);
-                
-                // Active oscillator clock driver
+                const scriptNode = window.audioCtx.createScriptProcessor(bufferSize, 1, 2);
+                window.audioMasterGain = window.audioCtx.createGain();
+                window.audioMasterGain.gain.value = 1.0;
+
                 const osc = window.audioCtx.createOscillator();
                 const silentGain = window.audioCtx.createGain();
                 silentGain.gain.value = 0;
                 osc.connect(silentGain);
-                silentGain.connect(window.scriptNode);
-                window.scriptNode.connect(window.audioCtx.destination);
+                silentGain.connect(scriptNode);
+
+                scriptNode.connect(window.audioMasterGain);
+                window.audioMasterGain.connect(window.audioCtx.destination);
                 osc.start();
 
-                window.scriptNode.onaudioprocess = (e) => {
+                scriptNode.onaudioprocess = (e) => {
                     const outL = e.outputBuffer.getChannelData(0);
                     const outR = e.outputBuffer.getChannelData(1);
                     let available = window.getAudioQueueLength();
 
-                    // Snap if backlog exceeds 45ms
-                    if (available > 1500) {
+                    if (available > 1300) {
                         readPos = (writePos - TARGET_CUSHION_SAMPLES + RING_SIZE) % RING_SIZE;
                         available = TARGET_CUSHION_SAMPLES;
                     }
 
-                    // Proportional dynamic speed compensation (locks buffer to ~25ms)
                     const baseRatio = GBA_SAMPLE_RATE / outSampleRate;
                     const error = (available - TARGET_CUSHION_SAMPLES) / TARGET_CUSHION_SAMPLES;
-                    const speed = baseRatio * Math.max(0.96, Math.min(1.04, 1.0 + error * 0.05));
+                    const speed = baseRatio * Math.max(0.97, Math.min(1.03, 1.0 + error * 0.04));
 
                     for (let i = 0; i < bufferSize; i++) {
                         if (available > 0) {
@@ -251,25 +253,11 @@
         let frameCount = 0;
         let lastTime = performance.now();
         let decompTimes = [];
-        let networkRtt = 10.0;
+        let networkRtt = 8.0;
         let isReady = false;
 
-        const BUFFER_DELAY_MS = 8.0;
-        const frameQueue = [];
-
-        async function updatePing() {
-            const t0 = performance.now();
-            try {
-                const res = await fetch('/ping', { cache: 'no-store' });
-                if (res.ok) {
-                    networkRtt = performance.now() - t0;
-                }
-            } catch(e) {}
-        }
-        setInterval(updatePing, 1000);
-        updatePing();
-
-        setInterval(() => {
+        // Instant Event-Driven Input Dispatch
+        function sendInputInstant() {
             if (isReady && ws.readyState === WebSocket.OPEN) {
                 inputSeq++;
                 const nowUs = Math.round(performance.now() * 1000);
@@ -285,10 +273,25 @@
                 buf[13] = (inputMask >> 8) & 0xFF;
                 ws.send(buf);
             }
-        }, 16);
+        }
+
+        setInterval(sendInputInstant, 32);
+
+        async function updatePing() {
+            const t0 = performance.now();
+            try {
+                const res = await fetch('/ping', { cache: 'no-store' });
+                if (res.ok) {
+                    networkRtt = performance.now() - t0;
+                }
+            } catch(e) {}
+        }
+        setInterval(updatePing, 1000);
+        updatePing();
 
         window.addEventListener('keydown', (e) => {
             const k = e.key.toLowerCase();
+            const prev = inputMask;
             if (k === 'z' || k === 'j') { inputMask |= (1 << 0); e.preventDefault(); }
             else if (k === 'x' || k === 'k') { inputMask |= (1 << 1); e.preventDefault(); }
             else if (k === ' ') { inputMask |= (1 << 2); e.preventDefault(); }
@@ -299,10 +302,14 @@
             else if (k === 's' || k === 'arrowdown') { inputMask |= (1 << 7); e.preventDefault(); }
             else if (k === 'e') { inputMask |= (1 << 8); e.preventDefault(); }
             else if (k === 'q') { inputMask |= (1 << 9); e.preventDefault(); }
+            if (inputMask !== prev) {
+                sendInputInstant();
+            }
         });
 
         window.addEventListener('keyup', (e) => {
             const k = e.key.toLowerCase();
+            const prev = inputMask;
             if (k === 'z' || k === 'j') { inputMask &= ~(1 << 0); e.preventDefault(); }
             else if (k === 'x' || k === 'k') { inputMask &= ~(1 << 1); e.preventDefault(); }
             else if (k === ' ') { inputMask &= ~(1 << 2); e.preventDefault(); }
@@ -313,13 +320,16 @@
             else if (k === 's' || k === 'arrowdown') { inputMask &= ~(1 << 7); e.preventDefault(); }
             else if (k === 'e') { inputMask &= ~(1 << 8); e.preventDefault(); }
             else if (k === 'q') { inputMask &= ~(1 << 9); e.preventDefault(); }
+            if (inputMask !== prev) {
+                sendInputInstant();
+            }
         });
 
-        ws.onmessage = (event) => {
-            const now = performance.now();
-            const bytes = new Uint8Array(event.data);
+        let latestFrameBytes = null;
+        let newFrameAvailable = false;
 
-            // Feed Audio immediately into Ring Buffer with explicit 16-bit LE decoding
+        ws.onmessage = (event) => {
+            const bytes = new Uint8Array(event.data);
             if (bytes.length >= 35) {
                 const audioLen = bytes[33] | (bytes[34] << 8);
                 if (audioLen > 0) {
@@ -327,35 +337,29 @@
                         const audioPayload = bytes.subarray(35, 35 + audioLen);
                         const rawAudio = lz4Decompress(audioPayload, 4096 * 2);
                         const numSamples = (rawAudio.length / 4) | 0;
-                        
                         for (let i = 0; i < numSamples; i++) {
                             let sL = (rawAudio[i * 4] | (rawAudio[i * 4 + 1] << 8));
                             if (sL >= 0x8000) sL -= 0x10000;
                             let sR = (rawAudio[i * 4 + 2] | (rawAudio[i * 4 + 3] << 8));
                             if (sR >= 0x8000) sR -= 0x10000;
-
                             const w = (writePos + i) % RING_SIZE;
                             ringBufL[w] = sL / 32768.0;
                             ringBufR[w] = sR / 32768.0;
                         }
                         writePos = (writePos + numSamples) % RING_SIZE;
-
                         if (!window.audioCtx || window.audioCtx.state !== 'running') {
                             readPos = (writePos - TARGET_CUSHION_SAMPLES + RING_SIZE) % RING_SIZE;
                         }
                     } catch(e) {}
                 }
+                latestFrameBytes = bytes;
+                newFrameAvailable = true;
             }
-
-            if (frameQueue.length >= 2) {
-                frameQueue.shift();
-            }
-            frameQueue.push({ bytes: bytes, targetTime: now + BUFFER_DELAY_MS });
         };
 
         function renderLoop() {
-            const now = performance.now();
-            if (frameQueue.length > 0 && (now >= frameQueue[0].targetTime || frameQueue.length >= 2)) {
+            if (newFrameAvailable && latestFrameBytes) {
+                newFrameAvailable = false;
                 if (!isReady) {
                     isReady = true;
                     const overlay = document.getElementById('loadingOverlay');
@@ -366,8 +370,7 @@
                 }
 
                 const t0 = performance.now();
-                const item = frameQueue.shift();
-                const bytes = item.bytes;
+                const bytes = latestFrameBytes;
 
                 const hostSimUs = (bytes[12] | (bytes[13] << 8) | (bytes[14] << 16) | (bytes[15] << 24));
                 const hostEncUs = (bytes[20] | (bytes[21] << 8) | (bytes[22] << 16) | (bytes[23] << 24));
@@ -436,7 +439,7 @@
                     const fps = (30 / ((now - lastTime) / 1000)).toFixed(1);
                     lastTime = now;
                     const avgClient = decompTimes.reduce((a,b)=>a+b,0)/decompTimes.length;
-                    const totalM2P = networkRtt + hostTotalMs + avgClient + 8.37 + BUFFER_DELAY_MS;
+                    const totalM2P = networkRtt + hostTotalMs + avgClient + 8.37;
                     const audioBufferMs = (window.getAudioQueueLength() / GBA_SAMPLE_RATE * 1000).toFixed(1);
 
                     totalEl.innerText = totalM2P.toFixed(1) + ' ms';

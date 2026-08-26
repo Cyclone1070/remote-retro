@@ -49,3 +49,7 @@ path = "benches/verify_audio.rs"
 [[bin]]
 name = "record_wav"
 path = "benches/record_wav.rs"
+
+[[bin]]
+name = "bench_server_pacing"
+path = "benches/bench_server_pacing.rs"

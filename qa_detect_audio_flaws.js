@@ -26,7 +26,7 @@ async function detectAudioFlaws() {
         window.__recordedR = [];
 
         const checkTap = setInterval(() => {
-            if (window.audioCtx && window.scriptNode) {
+            if (window.audioCtx && window.audioMasterGain) {
                 clearInterval(checkTap);
                 const tap = window.audioCtx.createScriptProcessor(1024, 2, 2);
                 tap.onaudioprocess = (e) => {
@@ -37,9 +37,9 @@ async function detectAudioFlaws() {
                         window.__recordedR.push(inR[i]);
                     }
                 };
-                window.scriptNode.connect(tap);
+                window.audioMasterGain.connect(tap);
                 tap.connect(window.audioCtx.destination);
-                console.log('Audio Tap hooked to ScriptProcessor!');
+                console.log('Audio Tap hooked to audioMasterGain!');
             }
         }, 50);
     });

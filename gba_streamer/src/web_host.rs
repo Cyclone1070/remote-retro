@@ -30,8 +30,11 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
         let mut encoder = PaletteEncoder::new();
         let mut audio_enc = AudioEncoder::new(44100);
 
+        let mut next_frame_time = Instant::now();
+        let frame_budget = Duration::from_nanos(16_742_706); // 59.7275 FPS exact GBA clock
+
         loop {
-            let frame_start = Instant::now();
+            next_frame_time += frame_budget;
 
             let matched_seq = seq_producer.load(Ordering::Relaxed);
             let matched_t_us = ts_producer.load(Ordering::Relaxed);
@@ -73,10 +76,17 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
                 let _ = tx_producer.send(Arc::new(packet));
             }
 
-            let frame_budget = Duration::from_micros(16742);
-            let elapsed = frame_start.elapsed();
-            if elapsed < frame_budget {
-                std::thread::sleep(frame_budget - elapsed);
+            let now = Instant::now();
+            if now < next_frame_time {
+                let remaining = next_frame_time - now;
+                if remaining > Duration::from_millis(2) {
+                    std::thread::sleep(remaining - Duration::from_millis(2));
+                }
+                while Instant::now() < next_frame_time {
+                    std::hint::spin_loop();
+                }
+            } else if now - next_frame_time > frame_budget * 2 {
+                next_frame_time = now;
             }
         }
     });
@@ -100,40 +110,41 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
             let ts = ts_consumer.clone();
             let mask = mask_consumer.clone();
 
-            ws.on_upgrade(move |websocket| async move {
-                let (mut ws_sender, mut ws_receiver) = websocket.split();
-                println!("Browser client connected via WebSocket!");
+            ws.max_send_queue(2)
+                .on_upgrade(move |websocket| async move {
+                    let (mut ws_sender, mut ws_receiver) = websocket.split();
+                    println!("Browser client connected via WebSocket (TCP_NODELAY active)!");
 
-                tokio::spawn(async move {
-                    while let Some(Ok(msg)) = ws_receiver.next().await {
-                        if msg.is_binary() {
-                            let bytes = msg.as_bytes();
-                            if bytes.len() >= 14 {
-                                let s = u32::from_le_bytes(bytes[0..4].try_into().unwrap_or_default());
-                                let t = u64::from_le_bytes(bytes[4..12].try_into().unwrap_or_default());
-                                let m = (bytes[12] as i16) | ((bytes[13] as i16) << 8);
-                                seq.store(s, Ordering::Relaxed);
-                                ts.store(t, Ordering::Relaxed);
-                                mask.store(m, Ordering::Relaxed);
-                            } else if bytes.len() >= 2 {
-                                let m = (bytes[0] as i16) | ((bytes[1] as i16) << 8);
-                                mask.store(m, Ordering::Relaxed);
+                    tokio::spawn(async move {
+                        while let Some(Ok(msg)) = ws_receiver.next().await {
+                            if msg.is_binary() {
+                                let bytes = msg.as_bytes();
+                                if bytes.len() >= 14 {
+                                    let s = u32::from_le_bytes(bytes[0..4].try_into().unwrap_or_default());
+                                    let t = u64::from_le_bytes(bytes[4..12].try_into().unwrap_or_default());
+                                    let m = (bytes[12] as i16) | ((bytes[13] as i16) << 8);
+                                    seq.store(s, Ordering::Relaxed);
+                                    ts.store(t, Ordering::Relaxed);
+                                    mask.store(m, Ordering::Relaxed);
+                                } else if bytes.len() >= 2 {
+                                    let m = (bytes[0] as i16) | ((bytes[1] as i16) << 8);
+                                    mask.store(m, Ordering::Relaxed);
+                                }
                             }
                         }
-                    }
-                });
+                    });
 
-                while let Ok(packet) = client_rx.recv().await {
-                    if ws_sender
-                        .send(warp::ws::Message::binary((*packet).clone()))
-                        .await
-                        .is_err()
-                    {
-                        break;
+                    while let Ok(packet) = client_rx.recv().await {
+                        if ws_sender
+                            .send(warp::ws::Message::binary((*packet).clone()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
-                }
-                println!("Client disconnected.");
-            })
+                    println!("Client disconnected.");
+                })
         });
 
     let routes = html_route.or(ping_route).or(ws_route);
