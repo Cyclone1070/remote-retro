@@ -31,7 +31,7 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
         let mut audio_enc = AudioEncoder::new(44100);
 
         let mut next_frame_time = Instant::now();
-        let frame_budget = Duration::from_nanos(16_742_706); // 59.7275 FPS exact GBA clock
+        let frame_budget = Duration::from_nanos(16_666_667); // 60.0000 FPS VSYNC-matched clock
 
         loop {
             next_frame_time += frame_budget;
@@ -134,7 +134,11 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
                         }
                     });
 
-                    while let Ok(packet) = client_rx.recv().await {
+                    while let Ok(mut packet) = client_rx.recv().await {
+                        // Drain stale frames to guarantee zero queuing delay
+                        while let Ok(newer_packet) = client_rx.try_recv() {
+                            packet = newer_packet;
+                        }
                         if ws_sender
                             .send(warp::ws::Message::binary((*packet).clone()))
                             .await

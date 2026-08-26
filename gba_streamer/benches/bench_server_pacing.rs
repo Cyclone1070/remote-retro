@@ -46,13 +46,13 @@ async fn main() -> Result<()> {
     let min_dt = sorted[0];
     let max_dt = sorted[sorted.len() - 1];
 
-    let outlier_count = intervals_ms.iter().filter(|&&dt| (dt - 16.743).abs() > 3.0).count();
+    let outlier_count = intervals_ms.iter().filter(|&&dt| (dt - 16.667).abs() > 3.0).count();
     let outlier_pct = (outlier_count as f64 / n) * 100.0;
 
     println!("\n===================================================================");
     println!(" ⏱️ SERVER EMISSION PACING BENCHMARK (1,000 SAMPLES)");
     println!("===================================================================");
-    println!("  Target GBA Interval:      16.743 ms (59.7275 FPS)");
+    println!("  Target VSYNC Interval:    16.667 ms (60.0000 FPS)");
     println!("  Mean Emission Interval:   {:.3} ms ({:.2} FPS)", mean_dt, 1000.0 / mean_dt);
     println!("  Pacing Jitter (σ):        {:.3} ms", jitter_sigma);
     println!("  P50 (Median) Interval:    {:.3} ms", p50);
