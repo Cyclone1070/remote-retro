@@ -466,9 +466,9 @@
 
                 for (let i = 0; i < palLen; i++) {
                     const p = pal16[i];
-                    paletteRgbaBuf[i * 4 + 0] = (((p & 0x7C00) >> 10) * 255 / 31) | 0;
-                    paletteRgbaBuf[i * 4 + 1] = (((p & 0x03E0) >> 5) * 255 / 31) | 0;
-                    paletteRgbaBuf[i * 4 + 2] = ((p & 0x001F) * 255 / 31) | 0;
+                    paletteRgbaBuf[i * 4 + 0] = (((p >> 11) & 0x1F) * 255 / 31) | 0; // Red: bits 11..15
+                    paletteRgbaBuf[i * 4 + 1] = (((p >> 5) & 0x3F) * 255 / 63) | 0;  // Green: bits 5..10
+                    paletteRgbaBuf[i * 4 + 2] = ((p & 0x1F) * 255 / 31) | 0;         // Blue: bits 0..4
                     paletteRgbaBuf[i * 4 + 3] = 255;
                 }
 
@@ -492,9 +492,9 @@
 
                 for (let i = 0; i < palLen; i++) {
                     const p = pal16[i];
-                    paletteRgbaBuf[i * 4 + 0] = (((p & 0x7C00) >> 10) * 255 / 31) | 0;
-                    paletteRgbaBuf[i * 4 + 1] = (((p & 0x03E0) >> 5) * 255 / 31) | 0;
-                    paletteRgbaBuf[i * 4 + 2] = ((p & 0x001F) * 255 / 31) | 0;
+                    paletteRgbaBuf[i * 4 + 0] = (((p >> 11) & 0x1F) * 255 / 31) | 0; // Red: bits 11..15
+                    paletteRgbaBuf[i * 4 + 1] = (((p >> 5) & 0x3F) * 255 / 63) | 0;  // Green: bits 5..10
+                    paletteRgbaBuf[i * 4 + 2] = ((p & 0x1F) * 255 / 31) | 0;         // Blue: bits 0..4
                     paletteRgbaBuf[i * 4 + 3] = 255;
                 }
 
