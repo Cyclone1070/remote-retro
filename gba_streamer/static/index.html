@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>⚡ GBA Streamer (VSYNC Phase-Locked Engine)</title>
+    <title>⚡ GBA Streamer (Dedicated Worker Engine)</title>
     <style>
         body { margin: 0; background: #09090b; color: #f4f4f5; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; overflow: hidden; }
         h1 { margin: 0 0 8px 0; font-size: 22px; color: #22c55e; letter-spacing: -0.5px; }
@@ -57,14 +57,14 @@
 </head>
 <body>
     <div class="main-container">
-        <h1>⚡ GBA Streamer (VSYNC Phase-Locked Engine)</h1>
+        <h1>⚡ GBA Streamer (Dedicated Worker Engine)</h1>
         
         <div class="canvas-wrapper" id="canvasWrapper">
             <canvas id="gbaCanvas" width="240" height="160"></canvas>
             <div id="loadingOverlay">
                 <div class="spinner"></div>
                 <div class="load-title">⚡ Connecting to GBA Stream...</div>
-                <div class="load-sub" id="connStatus">Initializing hardware WebGL2 GPU pipeline</div>
+                <div class="load-sub" id="connStatus">Initializing OffscreenCanvas WebGL2 worker</div>
             </div>
         </div>
 
@@ -81,7 +81,7 @@
             <div class="divider"></div>
             <div class="hud-item">
                 <span class="hud-label">Host Sim+Enc</span>
-                <span class="hud-value" id="hostLatency">0.34 ms</span>
+                <span class="hud-value" id="hostLatency">-- ms</span>
             </div>
             <div class="divider"></div>
             <div class="hud-item">
@@ -103,8 +103,8 @@
         </div>
     </div>
 
-    <!-- Fast pure JS LZ4 block decompressor -->
-    <script>
+    <!-- WebWorker Source Code -->
+    <script id="workerCode" type="javascript/worker">
         function lz4Decompress(input, uncompressedSize) {
             const output = new Uint8Array(uncompressedSize);
             let inputOffset = 4;
@@ -148,91 +148,255 @@
             return output.subarray(0, outputOffset);
         }
 
-        const canvas = document.getElementById('gbaCanvas');
-        const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false });
+        let gl = null;
+        let indexTex = null;
+        let paletteTex = null;
+        let paletteRgbaBuf = new Uint8Array(256 * 4);
+        let unpackedIndicesBuf = new Uint8Array(38400);
 
-        // WebGL2 Palette Shader
-        const vsSource = `#version 300 es
-            in vec2 a_position;
-            out vec2 v_uv;
-            void main() {
-                v_uv = vec2((a_position.x + 1.0) * 0.5, (1.0 - a_position.y) * 0.5);
-                gl_Position = vec4(a_position, 0.0, 1.0);
+        let ws = null;
+        let isReady = false;
+        let frameCount = 0;
+        let lastTime = performance.now();
+        let decompTimes = [];
+        let networkRtt = 4.0;
+        let latestHostMs = 1.2;
+
+        const vSyncQueue = [];
+        const VSYNC_PACING_CUSHION_MS = 16.666;
+
+        function initWebGL(canvas) {
+            gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, powerPreference: 'high-performance' });
+
+            const vsSource = `#version 300 es
+                in vec2 a_position;
+                out vec2 v_uv;
+                void main() {
+                    v_uv = vec2((a_position.x + 1.0) * 0.5, (1.0 - a_position.y) * 0.5);
+                    gl_Position = vec4(a_position, 0.0, 1.0);
+                }
+            `;
+
+            const fsSource = `#version 300 es
+                precision mediump float;
+                precision mediump usampler2D;
+                in vec2 v_uv;
+                uniform usampler2D u_indexTex;
+                uniform sampler2D u_paletteTex;
+                out vec4 fragColor;
+                void main() {
+                    uint idx = texture(u_indexTex, v_uv).r;
+                    fragColor = texelFetch(u_paletteTex, ivec2(int(idx), 0), 0);
+                }
+            `;
+
+            function createShader(gl, type, source) {
+                const shader = gl.createShader(type);
+                gl.shaderSource(shader, source);
+                gl.compileShader(shader);
+                return shader;
             }
-        `;
 
-        const fsSource = `#version 300 es
-            precision mediump float;
-            precision mediump usampler2D;
-            in vec2 v_uv;
-            uniform usampler2D u_indexTex;
-            uniform sampler2D u_paletteTex;
-            out vec4 fragColor;
-            void main() {
-                uint idx = texture(u_indexTex, v_uv).r;
-                fragColor = texelFetch(u_paletteTex, ivec2(int(idx), 0), 0);
-            }
-        `;
+            const program = gl.createProgram();
+            gl.attachShader(program, createShader(gl, gl.VERTEX_SHADER, vsSource));
+            gl.attachShader(program, createShader(gl, gl.FRAGMENT_SHADER, fsSource));
+            gl.linkProgram(program);
+            gl.useProgram(program);
 
-        function createShader(gl, type, source) {
-            const shader = gl.createShader(type);
-            gl.shaderSource(shader, source);
-            gl.compileShader(shader);
-            return shader;
+            const quadBuf = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+                -1, -1,  1, -1, -1,  1,
+                -1,  1,  1, -1,  1,  1,
+            ]), gl.STATIC_DRAW);
+
+            const aPos = gl.getAttribLocation(program, 'a_position');
+            gl.enableVertexAttribArray(aPos);
+            gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+            // Index Texture
+            indexTex = gl.createTexture();
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, indexTex);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8UI, 240, 160, 0, gl.RED_INTEGER, gl.UNSIGNED_BYTE, null);
+            gl.uniform1i(gl.getUniformLocation(program, 'u_indexTex'), 0);
+
+            // Palette Texture
+            paletteTex = gl.createTexture();
+            gl.activeTexture(gl.TEXTURE1);
+            gl.bindTexture(gl.TEXTURE_2D, paletteTex);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            gl.uniform1i(gl.getUniformLocation(program, 'u_paletteTex'), 1);
+
+            requestAnimationFrame(renderLoop);
         }
 
-        const program = gl.createProgram();
-        gl.attachShader(program, createShader(gl, gl.VERTEX_SHADER, vsSource));
-        gl.attachShader(program, createShader(gl, gl.FRAGMENT_SHADER, fsSource));
-        gl.linkProgram(program);
-        gl.useProgram(program);
+        function renderFrame(bytes) {
+            if (!isReady) {
+                isReady = true;
+                postMessage({ type: 'ready' });
+            }
 
-        const quadBuf = gl.createBuffer();
-        gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
-        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-            -1, -1,  1, -1, -1,  1,
-            -1,  1,  1, -1,  1,  1,
-        ]), gl.STATIC_DRAW);
+            const t0 = performance.now();
+            const hostSimUs = (bytes[12] | (bytes[13] << 8) | (bytes[14] << 16) | (bytes[15] << 24));
+            const hostEncUs = (bytes[20] | (bytes[21] << 8) | (bytes[22] << 16) | (bytes[23] << 24));
+            latestHostMs = (hostSimUs + hostEncUs) / 1000.0;
 
-        const aPos = gl.getAttribLocation(program, 'a_position');
-        gl.enableVertexAttribArray(aPos);
-        gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+            const flag = bytes[32];
+            const audioLen = bytes[33] | (bytes[34] << 8);
+            const videoPayload = bytes.subarray(35 + audioLen);
 
-        // Frame Index Texture (240x160 R8UI)
-        const indexTex = gl.createTexture();
-        gl.activeTexture(gl.TEXTURE0);
-        gl.bindTexture(gl.TEXTURE_2D, indexTex);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8UI, 240, 160, 0, gl.RED_INTEGER, gl.UNSIGNED_BYTE, null);
-        gl.uniform1i(gl.getUniformLocation(program, 'u_indexTex'), 0);
+            if (flag === 4) {
+                const decomp = lz4Decompress(videoPayload, 2 + 32 + 19200);
+                const palLen = decomp[0] | (decomp[1] << 8);
+                const pal16 = new Uint16Array(decomp.buffer, decomp.byteOffset + 2, palLen);
+                const packed = decomp.subarray(2 + palLen * 2);
 
-        // Palette Texture (256x1 RGBA)
-        const paletteTex = gl.createTexture();
-        gl.activeTexture(gl.TEXTURE1);
-        gl.bindTexture(gl.TEXTURE_2D, paletteTex);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-        gl.uniform1i(gl.getUniformLocation(program, 'u_paletteTex'), 1);
+                for (let i = 0; i < palLen; i++) {
+                    const p = pal16[i];
+                    paletteRgbaBuf[i * 4 + 0] = (((p >> 11) & 0x1F) * 255 / 31) | 0; // RED (RGB565)
+                    paletteRgbaBuf[i * 4 + 1] = (((p >> 5) & 0x3F) * 255 / 63) | 0;  // GREEN (RGB565)
+                    paletteRgbaBuf[i * 4 + 2] = ((p & 0x1F) * 255 / 31) | 0;         // BLUE (RGB565)
+                    paletteRgbaBuf[i * 4 + 3] = 255;
+                }
 
-        const paletteRgbaBuf = new Uint8Array(256 * 4);
-        const unpackedIndicesBuf = new Uint8Array(38400);
+                for (let i = 0; i < 19200; i++) {
+                    const b = packed[i];
+                    unpackedIndicesBuf[i * 2 + 0] = b & 0x0F;
+                    unpackedIndicesBuf[i * 2 + 1] = (b >> 4) & 0x0F;
+                }
 
-        const totalEl = document.getElementById('totalLatency');
-        const netEl = document.getElementById('netLatency');
-        const hostEl = document.getElementById('hostLatency');
-        const audioStatusEl = document.getElementById('audioStatus');
-        const fpsEl = document.getElementById('fpsVal');
+                gl.activeTexture(gl.TEXTURE1);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, palLen, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, paletteRgbaBuf.subarray(0, palLen * 4));
+
+                gl.activeTexture(gl.TEXTURE0);
+                gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 240, 160, gl.RED_INTEGER, gl.UNSIGNED_BYTE, unpackedIndicesBuf);
+                gl.drawArrays(gl.TRIANGLES, 0, 6);
+            } else if (flag === 2) {
+                const decomp = lz4Decompress(videoPayload, 2 + 512 + 38400);
+                const palLen = decomp[0] | (decomp[1] << 8);
+                const pal16 = new Uint16Array(decomp.buffer, decomp.byteOffset + 2, palLen);
+                const indices = decomp.subarray(2 + palLen * 2);
+
+                for (let i = 0; i < palLen; i++) {
+                    const p = pal16[i];
+                    paletteRgbaBuf[i * 4 + 0] = (((p >> 11) & 0x1F) * 255 / 31) | 0; // RED (RGB565)
+                    paletteRgbaBuf[i * 4 + 1] = (((p >> 5) & 0x3F) * 255 / 63) | 0;  // GREEN (RGB565)
+                    paletteRgbaBuf[i * 4 + 2] = ((p & 0x1F) * 255 / 31) | 0;         // BLUE (RGB565)
+                    paletteRgbaBuf[i * 4 + 3] = 255;
+                }
+
+                gl.activeTexture(gl.TEXTURE1);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, palLen, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, paletteRgbaBuf.subarray(0, palLen * 4));
+
+                gl.activeTexture(gl.TEXTURE0);
+                gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 240, 160, gl.RED_INTEGER, gl.UNSIGNED_BYTE, indices);
+                gl.drawArrays(gl.TRIANGLES, 0, 6);
+            }
+
+            const t1 = performance.now();
+            decompTimes.push(t1 - t0);
+            frameCount++;
+
+            if (frameCount % 30 === 0) {
+                const now = performance.now();
+                const fps = (30 / ((now - lastTime) / 1000)).toFixed(1);
+                lastTime = now;
+                const avgClient = decompTimes.reduce((a,b)=>a+b,0)/decompTimes.length;
+                const totalM2P = networkRtt + latestHostMs + avgClient + 16.66;
+                postMessage({
+                    type: 'stats',
+                    fps,
+                    hostMs: latestHostMs.toFixed(2),
+                    totalM2P: totalM2P.toFixed(1),
+                    netRtt: networkRtt.toFixed(1)
+                });
+                decompTimes = [];
+            }
+        }
+
+        function renderLoop() {
+            const now = performance.now();
+            if (vSyncQueue.length > 0) {
+                if (now >= vSyncQueue[0].targetTime || vSyncQueue.length >= 2) {
+                    const frame = vSyncQueue.shift();
+                    renderFrame(frame.bytes);
+                }
+            }
+            requestAnimationFrame(renderLoop);
+        }
+
+        self.onmessage = (e) => {
+            const data = e.data;
+            if (data.type === 'init') {
+                initWebGL(data.canvas);
+                
+                ws = new WebSocket(data.wsUrl);
+                ws.binaryType = 'arraybuffer';
+
+                ws.onmessage = (ev) => {
+                    const bytes = new Uint8Array(ev.data);
+                    if (bytes.length >= 35) {
+                        const now = performance.now();
+                        const audioLen = bytes[33] | (bytes[34] << 8);
+                        if (audioLen > 0) {
+                            try {
+                                const audioPayload = bytes.subarray(35, 35 + audioLen);
+                                const rawAudio = lz4Decompress(audioPayload, 4096);
+                                const audioCopy = new Uint8Array(rawAudio);
+                                postMessage({ type: 'audio', samples: audioCopy.buffer }, [audioCopy.buffer]);
+                            } catch(err) {}
+                        }
+
+                        vSyncQueue.push({
+                            bytes: bytes,
+                            targetTime: now + VSYNC_PACING_CUSHION_MS
+                        });
+
+                        while (vSyncQueue.length > 3) {
+                            vSyncQueue.shift();
+                        }
+                    }
+                };
+            } else if (data.type === 'input') {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(data.buffer);
+                }
+            } else if (data.type === 'net_rtt') {
+                networkRtt = data.rtt;
+            }
+        };
+    </script>
+
+    <!-- Main Thread Coordinator -->
+    <script>
+        const canvas = document.getElementById('gbaCanvas');
+        const offscreen = canvas.transferControlToOffscreen();
+
+        const workerBlob = new Blob([document.getElementById('workerCode').textContent], { type: 'text/javascript' });
+        const worker = new Worker(URL.createObjectURL(workerBlob));
+
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = protocol + '//' + window.location.host + '/ws';
+
+        worker.postMessage({
+            type: 'init',
+            canvas: offscreen,
+            wsUrl: wsUrl
+        }, [offscreen]);
 
         // ==========================================
-        // Continuous Linear-Resampled Audio Ring
+        // Continuous Audio Ring Buffer
         // ==========================================
         const GBA_SAMPLE_RATE = 32768;
-        const TARGET_CUSHION_SAMPLES = 850; // ~25.9 ms cushion
+        const TARGET_CUSHION_SAMPLES = 850;
         const RING_SIZE = 65536;
         const ringBufL = new Float32Array(RING_SIZE);
         const ringBufR = new Float32Array(RING_SIZE);
@@ -312,36 +476,65 @@
 
         try { window.initAudio(); } catch(e) {}
 
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = protocol + '//' + window.location.host + '/ws';
-        const ws = new WebSocket(wsUrl);
-        ws.binaryType = 'arraybuffer';
+        const totalEl = document.getElementById('totalLatency');
+        const netEl = document.getElementById('netLatency');
+        const hostEl = document.getElementById('hostLatency');
+        const audioStatusEl = document.getElementById('audioStatus');
+        const fpsEl = document.getElementById('fpsVal');
 
+        worker.onmessage = (e) => {
+            const data = e.data;
+            if (data.type === 'ready') {
+                const overlay = document.getElementById('loadingOverlay');
+                if (overlay) {
+                    overlay.style.opacity = '0';
+                    setTimeout(() => { overlay.style.visibility = 'hidden'; }, 200);
+                }
+            } else if (data.type === 'audio') {
+                const rawAudio = new Uint8Array(data.samples);
+                const numSamples = (rawAudio.length / 4) | 0;
+                if (numSamples > 0) {
+                    for (let i = 0; i < numSamples; i++) {
+                        let sL = (rawAudio[i * 4] | (rawAudio[i * 4 + 1] << 8));
+                        if (sL >= 0x8000) sL -= 0x10000;
+                        let sR = (rawAudio[i * 4 + 2] | (rawAudio[i * 4 + 3] << 8));
+                        if (sR >= 0x8000) sR -= 0x10000;
+                        const w = (writePos + i) % RING_SIZE;
+                        ringBufL[w] = sL / 32768.0;
+                        ringBufR[w] = sR / 32768.0;
+                    }
+                    writePos = (writePos + numSamples) % RING_SIZE;
+                    if (!window.audioCtx || window.audioCtx.state !== 'running') {
+                        readPos = (writePos - TARGET_CUSHION_SAMPLES + RING_SIZE) % RING_SIZE;
+                    }
+                }
+            } else if (data.type === 'stats') {
+                fpsEl.innerText = data.fps;
+                hostEl.innerText = data.hostMs + ' ms';
+                totalEl.innerText = data.totalM2P + ' ms';
+                netEl.innerText = data.netRtt + ' ms';
+                audioStatusEl.innerText = (window.getAudioQueueLength() / GBA_SAMPLE_RATE * 1000).toFixed(1) + ' ms';
+            }
+        };
+
+        // Instant Input Handler
         let inputMask = 0;
         let inputSeq = 0;
-        let frameCount = 0;
-        let lastTime = performance.now();
-        let decompTimes = [];
-        let networkRtt = 8.0;
-        let isReady = false;
 
-        // Instant Event-Driven Input Dispatch
         function sendInputInstant() {
-            if (isReady && ws.readyState === WebSocket.OPEN) {
-                inputSeq++;
-                const nowUs = Math.round(performance.now() * 1000);
-                const buf = new Uint8Array(14);
-                buf[0] = inputSeq & 0xFF;
-                buf[1] = (inputSeq >> 8) & 0xFF;
-                buf[2] = (inputSeq >> 16) & 0xFF;
-                buf[3] = (inputSeq >> 24) & 0xFF;
-                for (let i = 0; i < 8; i++) {
-                    buf[4 + i] = (nowUs / Math.pow(2, 8 * i)) & 0xFF;
-                }
-                buf[12] = inputMask & 0xFF;
-                buf[13] = (inputMask >> 8) & 0xFF;
-                ws.send(buf);
+            inputSeq++;
+            const nowUs = Math.round(performance.now() * 1000);
+            const buf = new Uint8Array(14);
+            buf[0] = inputSeq & 0xFF;
+            buf[1] = (inputSeq >> 8) & 0xFF;
+            buf[2] = (inputSeq >> 16) & 0xFF;
+            buf[3] = (inputSeq >> 24) & 0xFF;
+            for (let i = 0; i < 8; i++) {
+                buf[4 + i] = (nowUs / Math.pow(2, 8 * i)) & 0xFF;
             }
+            buf[12] = inputMask & 0xFF;
+            buf[13] = (inputMask >> 8) & 0xFF;
+            worker.postMessage({ type: 'input', buffer: buf.buffer }, [buf.buffer]);
         }
 
         setInterval(sendInputInstant, 32);
@@ -351,7 +544,8 @@
             try {
                 const res = await fetch('/ping', { cache: 'no-store' });
                 if (res.ok) {
-                    networkRtt = performance.now() - t0;
+                    const rtt = performance.now() - t0;
+                    worker.postMessage({ type: 'net_rtt', rtt: rtt });
                 }
             } catch(e) {}
         }
@@ -393,153 +587,6 @@
                 sendInputInstant();
             }
         });
-
-        // ==========================================
-        // VSYNC Phase-Locked Pacing Queue
-        // ==========================================
-        const vSyncQueue = [];
-        const VSYNC_PACING_CUSHION_MS = 16.666; // 1 exact frame smoothing
-
-        ws.onmessage = (event) => {
-            const bytes = new Uint8Array(event.data);
-            if (bytes.length >= 35) {
-                const now = performance.now();
-                const audioLen = bytes[33] | (bytes[34] << 8);
-                if (audioLen > 0) {
-                    try {
-                        const audioPayload = bytes.subarray(35, 35 + audioLen);
-                        const rawAudio = lz4Decompress(audioPayload, 4096 * 2);
-                        const numSamples = (rawAudio.length / 4) | 0;
-                        for (let i = 0; i < numSamples; i++) {
-                            let sL = (rawAudio[i * 4] | (rawAudio[i * 4 + 1] << 8));
-                            if (sL >= 0x8000) sL -= 0x10000;
-                            let sR = (rawAudio[i * 4 + 2] | (rawAudio[i * 4 + 3] << 8));
-                            if (sR >= 0x8000) sR -= 0x10000;
-                            const w = (writePos + i) % RING_SIZE;
-                            ringBufL[w] = sL / 32768.0;
-                            ringBufR[w] = sR / 32768.0;
-                        }
-                        writePos = (writePos + numSamples) % RING_SIZE;
-                        if (!window.audioCtx || window.audioCtx.state !== 'running') {
-                            readPos = (writePos - TARGET_CUSHION_SAMPLES + RING_SIZE) % RING_SIZE;
-                        }
-                    } catch(e) {}
-                }
-
-                vSyncQueue.push({
-                    bytes: bytes,
-                    targetTime: now + VSYNC_PACING_CUSHION_MS
-                });
-
-                // Keep queue healthy (max 3 frames)
-                while (vSyncQueue.length > 3) {
-                    vSyncQueue.shift();
-                }
-            }
-        };
-
-        function renderFrame(bytes) {
-            if (!isReady) {
-                isReady = true;
-                const overlay = document.getElementById('loadingOverlay');
-                if (overlay) {
-                    overlay.style.opacity = '0';
-                    setTimeout(() => { overlay.style.visibility = 'hidden'; }, 200);
-                }
-            }
-
-            const t0 = performance.now();
-            const hostSimUs = (bytes[12] | (bytes[13] << 8) | (bytes[14] << 16) | (bytes[15] << 24));
-            const hostEncUs = (bytes[20] | (bytes[21] << 8) | (bytes[22] << 16) | (bytes[23] << 24));
-            const hostTotalMs = (hostSimUs + hostEncUs) / 1000.0;
-
-            const flag = bytes[32];
-            const audioLen = bytes[33] | (bytes[34] << 8);
-            const videoPayload = bytes.subarray(35 + audioLen);
-
-            // Hardware WebGL2 GPU Direct Texture Blit
-            if (flag === 4) {
-                const decomp = lz4Decompress(videoPayload, 2 + 32 + 19200);
-                const palLen = decomp[0] | (decomp[1] << 8);
-                const pal16 = new Uint16Array(decomp.buffer, decomp.byteOffset + 2, palLen);
-                const packed = decomp.subarray(2 + palLen * 2);
-
-                for (let i = 0; i < palLen; i++) {
-                    const p = pal16[i];
-                    paletteRgbaBuf[i * 4 + 0] = (((p >> 11) & 0x1F) * 255 / 31) | 0; // Red: bits 11..15
-                    paletteRgbaBuf[i * 4 + 1] = (((p >> 5) & 0x3F) * 255 / 63) | 0;  // Green: bits 5..10
-                    paletteRgbaBuf[i * 4 + 2] = ((p & 0x1F) * 255 / 31) | 0;         // Blue: bits 0..4
-                    paletteRgbaBuf[i * 4 + 3] = 255;
-                }
-
-                for (let i = 0; i < 19200; i++) {
-                    const b = packed[i];
-                    unpackedIndicesBuf[i * 2 + 0] = b & 0x0F;
-                    unpackedIndicesBuf[i * 2 + 1] = (b >> 4) & 0x0F;
-                }
-
-                gl.activeTexture(gl.TEXTURE1);
-                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, palLen, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, paletteRgbaBuf.subarray(0, palLen * 4));
-
-                gl.activeTexture(gl.TEXTURE0);
-                gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 240, 160, gl.RED_INTEGER, gl.UNSIGNED_BYTE, unpackedIndicesBuf);
-                gl.drawArrays(gl.TRIANGLES, 0, 6);
-            } else if (flag === 2) {
-                const decomp = lz4Decompress(videoPayload, 2 + 512 + 38400);
-                const palLen = decomp[0] | (decomp[1] << 8);
-                const pal16 = new Uint16Array(decomp.buffer, decomp.byteOffset + 2, palLen);
-                const indices = decomp.subarray(2 + palLen * 2);
-
-                for (let i = 0; i < palLen; i++) {
-                    const p = pal16[i];
-                    paletteRgbaBuf[i * 4 + 0] = (((p >> 11) & 0x1F) * 255 / 31) | 0; // Red: bits 11..15
-                    paletteRgbaBuf[i * 4 + 1] = (((p >> 5) & 0x3F) * 255 / 63) | 0;  // Green: bits 5..10
-                    paletteRgbaBuf[i * 4 + 2] = ((p & 0x1F) * 255 / 31) | 0;         // Blue: bits 0..4
-                    paletteRgbaBuf[i * 4 + 3] = 255;
-                }
-
-                gl.activeTexture(gl.TEXTURE1);
-                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, palLen, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, paletteRgbaBuf.subarray(0, palLen * 4));
-
-                gl.activeTexture(gl.TEXTURE0);
-                gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 240, 160, gl.RED_INTEGER, gl.UNSIGNED_BYTE, indices);
-                gl.drawArrays(gl.TRIANGLES, 0, 6);
-            }
-
-            const t1 = performance.now();
-            const clientDur = t1 - t0;
-            decompTimes.push(clientDur);
-            frameCount++;
-
-            if (frameCount % 30 === 0) {
-                const now = performance.now();
-                const fps = (30 / ((now - lastTime) / 1000)).toFixed(1);
-                lastTime = now;
-                const avgClient = decompTimes.reduce((a,b)=>a+b,0)/decompTimes.length;
-                const totalM2P = networkRtt + hostTotalMs + avgClient + 16.66;
-                const audioBufferMs = (window.getAudioQueueLength() / GBA_SAMPLE_RATE * 1000).toFixed(1);
-
-                totalEl.innerText = totalM2P.toFixed(1) + ' ms';
-                netEl.innerText = networkRtt.toFixed(1) + ' ms';
-                hostEl.innerText = hostTotalMs.toFixed(2) + ' ms';
-                audioStatusEl.innerText = audioBufferMs + ' ms';
-                fpsEl.innerText = fps;
-                decompTimes = [];
-            }
-        }
-
-        function renderLoop() {
-            const now = performance.now();
-            if (vSyncQueue.length > 0) {
-                // If the front frame has reached its presentation time or queue has 2+ items, render it!
-                if (now >= vSyncQueue[0].targetTime || vSyncQueue.length >= 2) {
-                    const frame = vSyncQueue.shift();
-                    renderFrame(frame.bytes);
-                }
-            }
-            requestAnimationFrame(renderLoop);
-        }
-        requestAnimationFrame(renderLoop);
     </script>
 </body>
 </html>
