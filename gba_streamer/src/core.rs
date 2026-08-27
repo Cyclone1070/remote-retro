@@ -107,6 +107,10 @@ unsafe extern "C" fn environment_callback(cmd: c_uint, data: *mut c_void) -> boo
 pub struct RetroCore {
     _lib: &'static Library,
     retro_run: Symbol<'static, unsafe extern "C" fn()>,
+    retro_serialize: Option<Symbol<'static, unsafe extern "C" fn(*mut c_void, usize) -> bool>>,
+    retro_unserialize: Option<Symbol<'static, unsafe extern "C" fn(*const c_void, usize) -> bool>>,
+    state_buffer: Vec<u8>,
+    pub runahead: bool,
 }
 
 impl RetroCore {
@@ -145,6 +149,10 @@ impl RetroCore {
             > = lib.get(b"retro_load_game")?;
             let retro_run: Symbol<unsafe extern "C" fn()> = lib.get(b"retro_run")?;
 
+            let retro_serialize_size: Option<Symbol<unsafe extern "C" fn() -> usize>> = lib.get(b"retro_serialize_size").ok();
+            let retro_serialize: Option<Symbol<unsafe extern "C" fn(*mut c_void, usize) -> bool>> = lib.get(b"retro_serialize").ok();
+            let retro_unserialize: Option<Symbol<unsafe extern "C" fn(*const c_void, usize) -> bool>> = lib.get(b"retro_unserialize").ok();
+
             retro_set_environment(environment_callback);
             retro_set_video_refresh(video_refresh_callback);
             retro_set_audio_sample(audio_sample_callback);
@@ -163,9 +171,20 @@ impl RetroCore {
             };
             retro_load_game(&info);
 
+            let state_size = if let Some(ref get_sz) = retro_serialize_size {
+                get_sz()
+            } else {
+                0
+            };
+            let state_buffer = vec![0u8; state_size];
+
             Ok(Self {
                 _lib: lib,
                 retro_run,
+                retro_serialize,
+                retro_unserialize,
+                state_buffer,
+                runahead: true,
             })
         }
     }
@@ -176,14 +195,62 @@ impl RetroCore {
 
     pub fn step(&mut self) -> (u32, Vec<u16>, Vec<i16>) {
         let t0 = Instant::now();
-        unsafe {
-            (self.retro_run)();
+        
+        if self.runahead && self.retro_serialize.is_some() && self.retro_unserialize.is_some() && !self.state_buffer.is_empty() {
+            // ==========================================
+            // 1-FRAME RUN-AHEAD INPUT LAG ELIMINATION
+            // ==========================================
+            // 1. Advance canonical frame with user input
+            unsafe { (self.retro_run)(); }
+            
+            // 2. Capture canonical audio stream for real-time fidelity
+            let canonical_audio = {
+                let mut audio = AUDIO_BUFFER.lock().unwrap();
+                let samples = audio.clone();
+                audio.clear();
+                samples
+            };
+
+            // 3. Checkpoint canonical state
+            let sz = self.state_buffer.len();
+            unsafe {
+                if let Some(ref ser) = self.retro_serialize {
+                    ser(self.state_buffer.as_mut_ptr() as *mut c_void, sz);
+                }
+            }
+
+            // 4. Fast-forward 1 frame ahead into the future
+            unsafe { (self.retro_run)(); }
+
+            // 5. Capture future video frame (instant button reaction)
+            let future_frame = LAST_FRAME_16.lock().unwrap().clone();
+
+            // Discard speculative fast-forward audio
+            {
+                let mut audio = AUDIO_BUFFER.lock().unwrap();
+                audio.clear();
+            }
+
+            // 6. Rollback state to canonical frame
+            unsafe {
+                if let Some(ref unser) = self.retro_unserialize {
+                    unser(self.state_buffer.as_ptr() as *const c_void, sz);
+                }
+            }
+
+            let sim_us = t0.elapsed().as_micros() as u32;
+            (sim_us, future_frame, canonical_audio)
+        } else {
+            // Standard 1-Frame Emulation
+            unsafe {
+                (self.retro_run)();
+            }
+            let sim_us = t0.elapsed().as_micros() as u32;
+            let frame = LAST_FRAME_16.lock().unwrap().clone();
+            let mut audio = AUDIO_BUFFER.lock().unwrap();
+            let audio_samples = audio.clone();
+            audio.clear();
+            (sim_us, frame, audio_samples)
         }
-        let sim_us = t0.elapsed().as_micros() as u32;
-        let frame = LAST_FRAME_16.lock().unwrap().clone();
-        let mut audio = AUDIO_BUFFER.lock().unwrap();
-        let audio_samples = audio.clone();
-        audio.clear();
-        (sim_us, frame, audio_samples)
     }
 }
