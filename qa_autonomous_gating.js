@@ -102,6 +102,35 @@ async function runBrowserGating() {
     }
     console.log('  ↳ ✅ All 12 game buttons press & release cleanly with zero stuck keys.');
 
+    // -------------------------------------------------------------
+    // GATE 4.2: Live Run-Ahead HUD Toggle & Hotkey Verification
+    // -------------------------------------------------------------
+    console.log('  Testing Run-Ahead HUD button click & F2 hotkey toggling...');
+    const initialText = await page.$eval('#runaheadVal', el => el.innerText);
+    if (!initialText.includes('1F')) {
+        console.error(`❌ Unexpected initial runahead value: ${initialText}`);
+        process.exit(1);
+    }
+
+    // Test HUD Click Toggle
+    await page.click('#runaheadToggle');
+    await page.waitForTimeout(100);
+    const textAfterClick = await page.$eval('#runaheadVal', el => el.innerText);
+    if (!textAfterClick.includes('OFF')) {
+        console.error(`❌ Clicking HUD button failed to toggle Run-Ahead to OFF (got: ${textAfterClick})`);
+        process.exit(1);
+    }
+
+    // Test F2 Key Toggle
+    await page.keyboard.press('F2');
+    await page.waitForTimeout(100);
+    const textAfterF2 = await page.$eval('#runaheadVal', el => el.innerText);
+    if (!textAfterF2.includes('1F')) {
+        console.error(`❌ Pressing F2 failed to toggle Run-Ahead back to 1F (got: ${textAfterF2})`);
+        process.exit(1);
+    }
+    console.log('  ↳ ✅ Run-Ahead HUD button and F2 hotkey toggle seamlessly in real-time.');
+
     // Measure in-browser presentation deltas over 600 frames
     const presentationPromise = page.evaluate(() => {
         return new Promise((resolve) => {

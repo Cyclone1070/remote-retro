@@ -21,10 +21,12 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
     let last_input_seq = Arc::new(AtomicU32::new(0));
     let last_input_ts_us = Arc::new(AtomicU64::new(0));
     let input_mask = Arc::new(AtomicI16::new(0));
+    let runahead_frames = Arc::new(std::sync::atomic::AtomicU8::new(core.runahead_frames));
 
     let seq_producer = last_input_seq.clone();
     let ts_producer = last_input_ts_us.clone();
     let mask_producer = input_mask.clone();
+    let runahead_producer = runahead_frames.clone();
 
     std::thread::spawn(move || {
         let mut encoder = PaletteEncoder::new();
@@ -39,6 +41,12 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
             let matched_seq = seq_producer.load(Ordering::Relaxed);
             let matched_t_us = ts_producer.load(Ordering::Relaxed);
             let current_mask = mask_producer.load(Ordering::Relaxed);
+            let desired_runahead = runahead_producer.load(Ordering::Relaxed);
+
+            if core.runahead_frames != desired_runahead {
+                core.set_runahead_frames(desired_runahead);
+                println!("⚡ Live Run-Ahead switched to: {}F", desired_runahead);
+            }
 
             core.set_input(current_mask);
             let (sim_us, raw_frame, audio_samples) = core.step();
@@ -101,6 +109,7 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
     let seq_consumer = last_input_seq.clone();
     let ts_consumer = last_input_ts_us.clone();
     let mask_consumer = input_mask.clone();
+    let runahead_consumer = runahead_frames.clone();
 
     let ws_route = warp::path("ws")
         .and(warp::ws())
@@ -109,6 +118,7 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
             let seq = seq_consumer.clone();
             let ts = ts_consumer.clone();
             let mask = mask_consumer.clone();
+            let runahead = runahead_consumer.clone();
 
             ws.max_send_queue(2)
                 .on_upgrade(move |websocket| async move {
@@ -119,7 +129,11 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
                         while let Some(Ok(msg)) = ws_receiver.next().await {
                             if msg.is_binary() {
                                 let bytes = msg.as_bytes();
-                                if bytes.len() >= 14 {
+                                if bytes.len() == 3 && bytes[0] == 0xAA && bytes[1] == 0x52 {
+                                    let target_f = bytes[2];
+                                    runahead.store(target_f, Ordering::Relaxed);
+                                    println!("Client set Run-Ahead to: {}F", target_f);
+                                } else if bytes.len() >= 14 {
                                     let s = u32::from_le_bytes(bytes[0..4].try_into().unwrap_or_default());
                                     let t = u64::from_le_bytes(bytes[4..12].try_into().unwrap_or_default());
                                     let m = (bytes[12] as i16) | ((bytes[13] as i16) << 8);

@@ -51,6 +51,10 @@
         .hud-value.highlight { color: #4ade80; }
         .divider { width: 1px; height: 26px; background: #3f3f46; }
 
+        .hud-button { cursor: pointer; user-select: none; transition: transform 0.1s, background 0.2s; padding: 4px 10px; border-radius: 6px; border: 1px solid #3f3f46; background: #27272a; }
+        .hud-button:hover { background: #3f3f46; }
+        .hud-button:active { transform: scale(0.95); }
+
         .controls-card { margin-top: 12px; background: #141417; border: 1px solid #27272a; border-radius: 8px; padding: 10px 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px; color: #a1a1aa; }
         kbd { background: #27272a; border: 1px solid #52525b; border-radius: 4px; padding: 1px 6px; font-weight: bold; color: #fafafa; }
     </style>
@@ -93,6 +97,11 @@
                 <span class="hud-label">Delivered FPS</span>
                 <span class="hud-value highlight" id="fpsVal">60.0</span>
             </div>
+            <div class="divider"></div>
+            <div class="hud-item hud-button" id="runaheadToggle" title="Click or press F2 to toggle Run-Ahead lag reduction">
+                <span class="hud-label">⚡ Run-Ahead</span>
+                <span class="hud-value highlight" id="runaheadVal">1F (ON)</span>
+            </div>
         </div>
 
         <div class="controls-card">
@@ -100,6 +109,7 @@
             <div><strong>A Button:</strong> <kbd>Z</kbd> or <kbd>J</kbd></div>
             <div><strong>B Button:</strong> <kbd>X</kbd> or <kbd>K</kbd></div>
             <div><strong>Start / Select:</strong> <kbd>Enter</kbd> / <kbd>Space</kbd></div>
+            <div><strong>Toggle Run-Ahead:</strong> <kbd>F2</kbd> or click button</div>
         </div>
     </div>
 
@@ -161,6 +171,7 @@
         let decompTimes = [];
         let networkRtt = 4.0;
         let latestHostMs = 1.2;
+        let activeRunahead = 1;
 
         const vSyncQueue = [];
         const VSYNC_PACING_CUSHION_MS = 16.666;
@@ -310,12 +321,13 @@
                 const fps = (30 / ((now - lastTime) / 1000)).toFixed(1);
                 lastTime = now;
                 const avgClient = decompTimes.reduce((a,b)=>a+b,0)/decompTimes.length;
-                const totalM2P = networkRtt + latestHostMs + avgClient + 16.66;
+                const rawGlassM2P = networkRtt + latestHostMs + avgClient + 16.66;
+                const effectiveM2P = Math.max(2.0, rawGlassM2P - (activeRunahead * 16.666));
                 postMessage({
                     type: 'stats',
                     fps,
                     hostMs: latestHostMs.toFixed(2),
-                    totalM2P: totalM2P.toFixed(1),
+                    totalM2P: effectiveM2P.toFixed(1),
                     netRtt: networkRtt.toFixed(1)
                 });
                 decompTimes = [];
@@ -369,6 +381,12 @@
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(data.buffer);
                 }
+            } else if (data.type === 'control') {
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(data.buffer);
+                }
+            } else if (data.type === 'runahead_state') {
+                activeRunahead = data.frames;
             } else if (data.type === 'net_rtt') {
                 networkRtt = data.rtt;
             }
@@ -552,7 +570,34 @@
         setInterval(updatePing, 1000);
         updatePing();
 
+        let currentRunahead = 1;
+        const runaheadValEl = document.getElementById('runaheadVal');
+        const runaheadToggleEl = document.getElementById('runaheadToggle');
+
+        function toggleRunahead() {
+            currentRunahead = currentRunahead === 0 ? 1 : 0;
+            if (currentRunahead > 0) {
+                runaheadValEl.innerText = currentRunahead + 'F (ON)';
+                runaheadValEl.className = 'hud-value highlight';
+            } else {
+                runaheadValEl.innerText = 'OFF (0F)';
+                runaheadValEl.className = 'hud-value';
+            }
+            const ctrl = new Uint8Array([0xAA, 0x52, currentRunahead]);
+            worker.postMessage({ type: 'control', buffer: ctrl.buffer }, [ctrl.buffer]);
+            worker.postMessage({ type: 'runahead_state', frames: currentRunahead });
+        }
+
+        if (runaheadToggleEl) {
+            runaheadToggleEl.addEventListener('click', toggleRunahead);
+        }
+
         window.addEventListener('keydown', (e) => {
+            if (e.key === 'F2') {
+                e.preventDefault();
+                toggleRunahead();
+                return;
+            }
             const k = e.key.toLowerCase();
             const prev = inputMask;
             if (k === 'z' || k === 'j') { inputMask |= (1 << 0); e.preventDefault(); }

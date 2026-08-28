@@ -110,11 +110,19 @@ pub struct RetroCore {
     retro_serialize: Option<Symbol<'static, unsafe extern "C" fn(*mut c_void, usize) -> bool>>,
     retro_unserialize: Option<Symbol<'static, unsafe extern "C" fn(*const c_void, usize) -> bool>>,
     state_buffer: Vec<u8>,
-    pub runahead: bool,
+    pub runahead_frames: u8,
+    pub rom_title: String,
+    pub rom_game_code: String,
 }
 
 impl RetroCore {
     pub fn load(core_path: &str, rom_path: &str) -> Result<Self> {
+        let rom_info = crate::runahead_db::inspect_gba_rom(rom_path);
+        println!(
+            "Loaded GBA ROM: '{}' [{}] -> Auto Runahead: {}F",
+            rom_info.title, rom_info.game_code, rom_info.recommended_runahead
+        );
+
         let lib: &'static Library = Box::leak(Box::new(
             unsafe { Library::new(core_path) }
                 .context(format!("Failed to load core: {}", core_path))?,
@@ -184,7 +192,9 @@ impl RetroCore {
                 retro_serialize,
                 retro_unserialize,
                 state_buffer,
-                runahead: true,
+                runahead_frames: rom_info.recommended_runahead,
+                rom_title: rom_info.title,
+                rom_game_code: rom_info.game_code,
             })
         }
     }
@@ -193,12 +203,16 @@ impl RetroCore {
         INPUT_STATE.store(mask, Ordering::Relaxed);
     }
 
+    pub fn set_runahead_frames(&mut self, frames: u8) {
+        self.runahead_frames = frames.min(2);
+    }
+
     pub fn step(&mut self) -> (u32, Vec<u16>, Vec<i16>) {
         let t0 = Instant::now();
         
-        if self.runahead && self.retro_serialize.is_some() && self.retro_unserialize.is_some() && !self.state_buffer.is_empty() {
+        if self.runahead_frames > 0 && self.retro_serialize.is_some() && self.retro_unserialize.is_some() && !self.state_buffer.is_empty() {
             // ==========================================
-            // 1-FRAME RUN-AHEAD INPUT LAG ELIMINATION
+            // MULTI-FRAME RUN-AHEAD INPUT LAG ELIMINATION
             // ==========================================
             // 1. Advance canonical frame with user input
             unsafe { (self.retro_run)(); }
@@ -219,8 +233,10 @@ impl RetroCore {
                 }
             }
 
-            // 4. Fast-forward 1 frame ahead into the future
-            unsafe { (self.retro_run)(); }
+            // 4. Fast-forward N frames ahead into the future
+            for _ in 0..self.runahead_frames {
+                unsafe { (self.retro_run)(); }
+            }
 
             // 5. Capture future video frame (instant button reaction)
             let future_frame = LAST_FRAME_16.lock().unwrap().clone();
@@ -241,7 +257,7 @@ impl RetroCore {
             let sim_us = t0.elapsed().as_micros() as u32;
             (sim_us, future_frame, canonical_audio)
         } else {
-            // Standard 1-Frame Emulation
+            // Standard Emulation (0 Run-Ahead Frames)
             unsafe {
                 (self.retro_run)();
             }
