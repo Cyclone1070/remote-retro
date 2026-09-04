@@ -57,3 +57,7 @@ path = "benches/bench_server_pacing.rs"
 [[bin]]
 name = "bench_runahead"
 path = "benches/bench_runahead.rs"
+
+[[bin]]
+name = "bench_localhost_pacing"
+path = "benches/bench_localhost_pacing.rs"

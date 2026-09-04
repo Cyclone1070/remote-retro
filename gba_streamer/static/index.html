@@ -174,6 +174,10 @@
         let fullFrameRgba = new Uint8Array(240 * 160 * 4);
         let fullFrameRgb565 = new Uint16Array(240 * 160);
 
+        const DICT_CACHE_SIZE = 4096;
+        const tileCache = new Uint16Array(DICT_CACHE_SIZE * 64);
+        let cacheHead = 0;
+
         let ws = null;
         let isReady = false;
         let frameCount = 0;
@@ -182,6 +186,8 @@
         let networkRtt = 4.0;
         let latestHostMs = 1.2;
         let activeRunahead = 1;
+        let lastRenderTime = 0;
+        let honestRenderDeltas = [];
 
         async function initGraphics(canvas) {
             // Attempt WebGPU first
@@ -351,34 +357,125 @@
             const videoPayload = bytes.subarray(35 + audioLen);
 
             if (flag === 8) {
-                // Flag 8: Delta Tile Blocks (Sub-MTU Low Bandwidth)
-                const decomp = lz4Decompress(videoPayload, 2 + 600 * (2 + 128));
+                // Flag 8: Dynamic Tile Dictionary Delta Blocks
+                const decomp = lz4Decompress(videoPayload, 2 + 600 * (3 + 128));
                 const numBlocks = decomp[0] | (decomp[1] << 8);
                 let offset = 2;
 
                 for (let b = 0; b < numBlocks; b++) {
                     const bIdx = decomp[offset] | (decomp[offset + 1] << 8);
-                    offset += 2;
+                    const mode = decomp[offset + 2];
+                    offset += 3;
+
                     const bx = (bIdx % 30) * 8;
                     const by = Math.floor(bIdx / 30) * 8;
 
-                    for (let py = 0; py < 8; py++) {
-                        const y = by + py;
-                        for (let px = 0; px < 8; px++) {
-                            const x = bx + px;
-                            const p16 = decomp[offset] | (decomp[offset + 1] << 8);
+                    if (mode === 0) {
+                        // Mode 0: Solid color
+                        const c = decomp[offset] | (decomp[offset + 1] << 8);
+                        offset += 2;
+                        const r = (((c >> 11) & 0x1F) * 255 / 31) | 0;
+                        const g = (((c >> 5) & 0x3F) * 255 / 63) | 0;
+                        const bl = ((c & 0x1F) * 255 / 31) | 0;
+
+                        for (let py = 0; py < 8; py++) {
+                            const y = by + py;
+                            for (let px = 0; px < 8; px++) {
+                                const pIdx = y * 240 + (bx + px);
+                                fullFrameRgb565[pIdx] = c;
+                                const rgbaIdx = pIdx * 4;
+                                fullFrameRgba[rgbaIdx + 0] = r;
+                                fullFrameRgba[rgbaIdx + 1] = g;
+                                fullFrameRgba[rgbaIdx + 2] = bl;
+                                fullFrameRgba[rgbaIdx + 3] = 255;
+                            }
+                        }
+                    } else if (mode === 1) {
+                        // Mode 1: Cache Hit (64 pixels from tileCache)
+                        const cacheId = decomp[offset] | (decomp[offset + 1] << 8);
+                        offset += 2;
+                        const cBase = cacheId * 64;
+
+                        for (let py = 0; py < 8; py++) {
+                            const y = by + py;
+                            for (let px = 0; px < 8; px++) {
+                                const c = tileCache[cBase + py * 8 + px];
+                                const pIdx = y * 240 + (bx + px);
+                                fullFrameRgb565[pIdx] = c;
+                                const rgbaIdx = pIdx * 4;
+                                fullFrameRgba[rgbaIdx + 0] = (((c >> 11) & 0x1F) * 255 / 31) | 0;
+                                fullFrameRgba[rgbaIdx + 1] = (((c >> 5) & 0x3F) * 255 / 63) | 0;
+                                fullFrameRgba[rgbaIdx + 2] = ((c & 0x1F) * 255 / 31) | 0;
+                                fullFrameRgba[rgbaIdx + 3] = 255;
+                            }
+                        }
+                    } else if (mode === 2) {
+                        // Mode 2: 4bpp Tile Miss
+                        const palLen = decomp[offset++];
+                        const pal = new Uint16Array(palLen);
+                        for (let i = 0; i < palLen; i++) {
+                            pal[i] = decomp[offset] | (decomp[offset + 1] << 8);
                             offset += 2;
-                            const pIdx = y * 240 + x;
-                            fullFrameRgb565[pIdx] = p16;
-                            fullFrameRgba[pIdx * 4 + 0] = (((p16 >> 11) & 0x1F) * 255 / 31) | 0;
-                            fullFrameRgba[pIdx * 4 + 1] = (((p16 >> 5) & 0x3F) * 255 / 63) | 0;
-                            fullFrameRgba[pIdx * 4 + 2] = ((p16 & 0x1F) * 255 / 31) | 0;
-                            fullFrameRgba[pIdx * 4 + 3] = 255;
+                        }
+
+                        const cBase = cacheHead * 64;
+                        cacheHead = (cacheHead + 1) % DICT_CACHE_SIZE;
+
+                        for (let i = 0; i < 32; i++) {
+                            const byte = decomp[offset++];
+                            const c0 = pal[byte & 0x0F] || 0;
+                            const c1 = pal[(byte >> 4) & 0x0F] || 0;
+
+                            const p0 = i * 2;
+                            const p1 = i * 2 + 1;
+                            tileCache[cBase + p0] = c0;
+                            tileCache[cBase + p1] = c1;
+
+                            const py0 = Math.floor(p0 / 8);
+                            const px0 = p0 % 8;
+                            const pIdx0 = (by + py0) * 240 + (bx + px0);
+                            fullFrameRgb565[pIdx0] = c0;
+                            const r0 = pIdx0 * 4;
+                            fullFrameRgba[r0 + 0] = (((c0 >> 11) & 0x1F) * 255 / 31) | 0;
+                            fullFrameRgba[r0 + 1] = (((c0 >> 5) & 0x3F) * 255 / 63) | 0;
+                            fullFrameRgba[r0 + 2] = ((c0 & 0x1F) * 255 / 31) | 0;
+                            fullFrameRgba[r0 + 3] = 255;
+
+                            const py1 = Math.floor(p1 / 8);
+                            const px1 = p1 % 8;
+                            const pIdx1 = (by + py1) * 240 + (bx + px1);
+                            fullFrameRgb565[pIdx1] = c1;
+                            const r1 = pIdx1 * 4;
+                            fullFrameRgba[r1 + 0] = (((c1 >> 11) & 0x1F) * 255 / 31) | 0;
+                            fullFrameRgba[r1 + 1] = (((c1 >> 5) & 0x3F) * 255 / 63) | 0;
+                            fullFrameRgba[r1 + 2] = ((c1 & 0x1F) * 255 / 31) | 0;
+                            fullFrameRgba[r1 + 3] = 255;
+                        }
+                    } else if (mode === 3) {
+                        // Mode 3: Raw 64 Pixels Miss
+                        const cBase = cacheHead * 64;
+                        cacheHead = (cacheHead + 1) % DICT_CACHE_SIZE;
+
+                        for (let py = 0; py < 8; py++) {
+                            const y = by + py;
+                            for (let px = 0; px < 8; px++) {
+                                const c = decomp[offset] | (decomp[offset + 1] << 8);
+                                offset += 2;
+                                tileCache[cBase + py * 8 + px] = c;
+                                const pIdx = y * 240 + (bx + px);
+                                fullFrameRgb565[pIdx] = c;
+                                const rgbaIdx = pIdx * 4;
+                                fullFrameRgba[rgbaIdx + 0] = (((c >> 11) & 0x1F) * 255 / 31) | 0;
+                                fullFrameRgba[rgbaIdx + 1] = (((c >> 5) & 0x3F) * 255 / 63) | 0;
+                                fullFrameRgba[rgbaIdx + 2] = ((c & 0x1F) * 255 / 31) | 0;
+                                fullFrameRgba[rgbaIdx + 3] = 255;
+                            }
                         }
                     }
                 }
             } else if (flag === 4) {
-                // Flag 4: Nibble 4-bit Palette Keyframe
+                // Flag 4: Nibble 4-bit Palette Keyframe (resets tile dictionary)
+                cacheHead = 0;
                 const decomp = lz4Decompress(videoPayload, 2 + 32 + 19200);
                 const palLen = decomp[0] | (decomp[1] << 8);
                 const pal16 = new Uint16Array(decomp.buffer, decomp.byteOffset + 2, palLen);
@@ -407,7 +504,8 @@
                     fullFrameRgba[pIdx1 * 4 + 3] = 255;
                 }
             } else if (flag === 2) {
-                // Flag 2: 8-bit Byte Palette Keyframe
+                // Flag 2: 8-bit Byte Palette Keyframe (resets tile dictionary)
+                cacheHead = 0;
                 const decomp = lz4Decompress(videoPayload, 2 + 512 + 38400);
                 const palLen = decomp[0] | (decomp[1] << 8);
                 const pal16 = new Uint16Array(decomp.buffer, decomp.byteOffset + 2, palLen);
@@ -416,6 +514,19 @@
                 for (let i = 0; i < 38400; i++) {
                     const idx = indices[i];
                     const p = pal16[idx];
+                    fullFrameRgb565[i] = p;
+                    fullFrameRgba[i * 4 + 0] = (((p >> 11) & 0x1F) * 255 / 31) | 0;
+                    fullFrameRgba[i * 4 + 1] = (((p >> 5) & 0x3F) * 255 / 63) | 0;
+                    fullFrameRgba[i * 4 + 2] = ((p & 0x1F) * 255 / 31) | 0;
+                    fullFrameRgba[i * 4 + 3] = 255;
+                }
+            } else if (flag === 1) {
+                // Flag 1: Raw Frame Keyframe (resets tile dictionary)
+                cacheHead = 0;
+                const decomp = lz4Decompress(videoPayload, 240 * 160 * 2);
+                const src16 = new Uint16Array(decomp.buffer, decomp.byteOffset, 240 * 160);
+                for (let i = 0; i < 38400; i++) {
+                    const p = src16[i];
                     fullFrameRgb565[i] = p;
                     fullFrameRgba[i * 4 + 0] = (((p >> 11) & 0x1F) * 255 / 31) | 0;
                     fullFrameRgba[i * 4 + 1] = (((p >> 5) & 0x3F) * 255 / 63) | 0;
@@ -457,6 +568,12 @@
             }
 
             const t1 = performance.now();
+            if (lastRenderTime > 0) {
+                const dt = t1 - lastRenderTime;
+                honestRenderDeltas.push(dt);
+                if (honestRenderDeltas.length > 2000) honestRenderDeltas.shift();
+            }
+            lastRenderTime = t1;
             decompTimes.push(t1 - t0);
             frameCount++;
 
@@ -473,7 +590,8 @@
                     hostMs: latestHostMs.toFixed(2),
                     totalM2P: effectiveM2P.toFixed(1),
                     netRtt: networkRtt.toFixed(1),
-                    runahead: activeRunahead
+                    runahead: activeRunahead,
+                    recentDeltas: honestRenderDeltas.slice(-30)
                 });
                 decompTimes = [];
             }
@@ -544,7 +662,7 @@
         // Continuous Audio Ring Buffer
         // ==========================================
         const GBA_SAMPLE_RATE = 32768;
-        const TARGET_CUSHION_SAMPLES = 850;
+        const TARGET_CUSHION_SAMPLES = 1200;
         const RING_SIZE = 65536;
         const ringBufL = new Float32Array(RING_SIZE);
         const ringBufR = new Float32Array(RING_SIZE);
@@ -585,7 +703,7 @@
                     const outR = e.outputBuffer.getChannelData(1);
                     let available = window.getAudioQueueLength();
 
-                    if (available > 1400) {
+                    if (available > 2200) {
                         readPos = (writePos - TARGET_CUSHION_SAMPLES + RING_SIZE) % RING_SIZE;
                         available = TARGET_CUSHION_SAMPLES;
                     }
@@ -630,6 +748,41 @@
         const audioStatusEl = document.getElementById('audioStatus');
         const fpsEl = document.getElementById('fpsVal');
 
+        window.__honestRenderHistory = [];
+        window.getHonestStutterMetrics = function(sampleCount = 600) {
+            const history = window.__honestRenderHistory;
+            const slice = history.slice(-sampleCount);
+            if (slice.length < 30) return null;
+            const n = slice.length;
+            const mean = slice.reduce((a, b) => a + b, 0) / n;
+            const variance = slice.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / (n - 1 || 1);
+            const sigma = Math.sqrt(variance);
+            const macros = slice.filter(d => d >= 33.33).length;
+            const micros = slice.filter(d => (d > 20.0 || d < 13.3) && d < 33.33).length;
+            const sorted = [...slice].sort((a, b) => a - b);
+            const p1Idx = Math.floor(n * 0.01);
+            const p01Idx = Math.floor(n * 0.001);
+            const p1Delta = sorted[Math.min(n - 1, Math.max(0, n - 1 - p1Idx))];
+            const p01Delta = sorted[Math.min(n - 1, Math.max(0, n - 1 - p01Idx))];
+            return {
+                evaluatedFrames: n,
+                fps: (1000.0 / mean).toFixed(2),
+                meanMs: mean.toFixed(3),
+                sigmaMs: sigma.toFixed(3),
+                macroStutters: macros,
+                macroStutterPct: ((macros / n) * 100).toFixed(2),
+                microStutters: micros,
+                microStutterPct: ((micros / n) * 100).toFixed(2),
+                p1LowFps: (1000.0 / p1Delta).toFixed(2),
+                p01LowFps: (1000.0 / p01Delta).toFixed(2),
+                p50: sorted[Math.floor(n * 0.50)].toFixed(2),
+                p95: sorted[Math.floor(n * 0.95)].toFixed(2),
+                p99: sorted[Math.floor(n * 0.99)].toFixed(2),
+                minMs: sorted[0].toFixed(2),
+                maxMs: sorted[sorted.length - 1].toFixed(2),
+            };
+        };
+
         worker.onmessage = (e) => {
             const data = e.data;
             if (data.type === 'ready') {
@@ -662,6 +815,12 @@
                     titleEl.innerText = '⚡ GBA Streamer (' + data.engine + ')';
                 }
             } else if (data.type === 'stats') {
+                if (data.recentDeltas) {
+                    window.__honestRenderHistory.push(...data.recentDeltas);
+                    if (window.__honestRenderHistory.length > 3000) {
+                        window.__honestRenderHistory = window.__honestRenderHistory.slice(-2000);
+                    }
+                }
                 fpsEl.innerText = data.fps;
                 hostEl.innerText = data.hostMs + ' ms';
                 totalEl.innerText = data.totalM2P + ' ms';

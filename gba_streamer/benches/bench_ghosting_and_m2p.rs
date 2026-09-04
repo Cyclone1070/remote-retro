@@ -82,7 +82,7 @@ async fn main() -> Result<()> {
     let mut clean_audio_frames = 0;
     let mut corrupt_frames = 0;
     let mut screen_buffer = vec![0u16; TOTAL_PIXELS];
-    let mut ppu_state = gba_streamer::codec::PpuState::new();
+    let mut tile_decoder = gba_streamer::codec::TileCacheDecoder::new();
 
     println!("===================================================================");
     println!(" ⚡ AUDITED A/V SYNCHRONIZED LOSSLESS BENCHMARK (2,000 FRAMES) ");
@@ -128,86 +128,9 @@ async fn main() -> Result<()> {
 
                 // Video validation
                 let mut valid_video = false;
-                if flag == 4 {
-                    if let Ok(decomp) = lz4_flex::decompress_size_prepended(video_payload) {
-                        if decomp.len() >= 2 {
-                            let pal_len = u16::from_le_bytes(decomp[0..2].try_into().unwrap()) as usize;
-                            if decomp.len() >= 2 + pal_len * 2 + TOTAL_PIXELS / 2 {
-                                let pal_src = unsafe {
-                                    std::slice::from_raw_parts(decomp[2..2 + pal_len * 2].as_ptr() as *const u16, pal_len)
-                                };
-                                let packed = &decomp[2 + pal_len * 2..];
-                                for i in 0..TOTAL_PIXELS / 2 {
-                                    let b = packed[i];
-                                    screen_buffer[i * 2] = pal_src[(b & 0x0F) as usize];
-                                    screen_buffer[i * 2 + 1] = pal_src[((b >> 4) & 0x0F) as usize];
-                                }
-                                valid_video = true;
-                            }
-                        }
-                    }
-                } else if flag == 2 {
-                    if let Ok(decomp) = lz4_flex::decompress_size_prepended(video_payload) {
-                        if decomp.len() >= 2 {
-                            let pal_len = u16::from_le_bytes(decomp[0..2].try_into().unwrap()) as usize;
-                            if decomp.len() >= 2 + pal_len * 2 + TOTAL_PIXELS {
-                                let pal_src = unsafe {
-                                    std::slice::from_raw_parts(decomp[2..2 + pal_len * 2].as_ptr() as *const u16, pal_len)
-                                };
-                                let indices = &decomp[2 + pal_len * 2..];
-                                for p in 0..TOTAL_PIXELS {
-                                    screen_buffer[p] = pal_src[indices[p] as usize];
-                                }
-                                valid_video = true;
-                            }
-                        }
-                    }
-                } else if flag == 8 {
-                    if let Ok(decomp) = lz4_flex::decompress_size_prepended(video_payload) {
-                        if decomp.len() >= 2 {
-                            let num_blocks = u16::from_le_bytes(decomp[0..2].try_into().unwrap()) as usize;
-                            let mut offset = 2;
-                            let mut ok = true;
-                            for _ in 0..num_blocks {
-                                if offset + 2 + 128 > decomp.len() {
-                                    ok = false;
-                                    break;
-                                }
-                                let b_idx = u16::from_le_bytes(decomp[offset..offset + 2].try_into().unwrap()) as usize;
-                                offset += 2;
-                                let bx = (b_idx % 30) * 8;
-                                let by = (b_idx / 30) * 8;
-                                let block_slice = unsafe {
-                                    std::slice::from_raw_parts(decomp[offset..offset + 128].as_ptr() as *const u16, 64)
-                                };
-                                offset += 128;
-                                for py in 0..8 {
-                                    let y = by + py;
-                                    for px in 0..8 {
-                                        let x = bx + px;
-                                        screen_buffer[y * 240 + x] = block_slice[py * 8 + px];
-                                    }
-                                }
-                            }
-                            if ok {
-                                valid_video = true;
-                            }
-                        }
-                    }
-                } else if flag == 1 {
-                    if let Ok(decomp) = lz4_flex::decompress_size_prepended(video_payload) {
-                        if decomp.len() == TOTAL_PIXELS * 2 {
-                            let src16 = unsafe {
-                                std::slice::from_raw_parts(decomp.as_ptr() as *const u16, TOTAL_PIXELS)
-                            };
-                            screen_buffer.copy_from_slice(src16);
-                            valid_video = true;
-                        }
-                    }
-                } else if flag == 16 {
-                    if ppu_state.apply_payload(video_payload).is_ok() {
-                        valid_video = true;
-                    }
+                if let Ok(frame) = tile_decoder.decode(flag, video_payload) {
+                    screen_buffer.copy_from_slice(frame);
+                    valid_video = true;
                 }
 
                 if valid_video { clean_video_frames += 1; } else { corrupt_frames += 1; }

@@ -233,29 +233,13 @@ sys.exit(0)
     // -------------------------------------------------------------
     // GATE 4.5: 600-Frame In-Browser Presentation & Zero-Stutter Gating
     // -------------------------------------------------------------
-    console.log('▶ [GATE 4.5] Measuring in-browser presentation deltas over 600 frames...');
-    const presentationPromise = page.evaluate(() => {
-        return new Promise((resolve) => {
-            const deltas = [];
-            let last = performance.now();
-            let count = 0;
-            function onFrame() {
-                const now = performance.now();
-                deltas.push(now - last);
-                last = now;
-                count++;
-                if (count < 600) {
-                    requestAnimationFrame(onFrame);
-                } else {
-                    resolve(deltas.slice(30)); // skip warm-up
-                }
-            }
-            requestAnimationFrame(onFrame);
-        });
-    });
+    console.log('▶ [GATE 4.5] Measuring actual canvas render deltas over 600 frames...');
+    await page.waitForFunction(() => {
+        return window.__honestRenderHistory && window.__honestRenderHistory.length >= 600;
+    }, { timeout: 20000 });
 
-    await page.waitForTimeout(4500);
-    const frameDeltas = await presentationPromise;
+    const honestMetrics = await page.evaluate(() => window.getHonestStutterMetrics(600));
+    const frameDeltas = (await page.evaluate(() => window.__honestRenderHistory)).slice(-600);
 
     // Collect Audio Samples
     const audioData = await page.evaluate(() => {
@@ -280,7 +264,13 @@ sys.exit(0)
     let inDropout = false;
     let dropouts = 0;
 
-    for (let i = 0; i < L.length; i++) {
+    // Find start of audio stream (skip pre-playback cold start silence)
+    let startIdx = 0;
+    while (startIdx < L.length && Math.abs(L[startIdx]) < 0.001 && Math.abs(R[startIdx]) < 0.001) {
+        startIdx++;
+    }
+
+    for (let i = startIdx; i < L.length; i++) {
         const valL = L[i];
         const valR = R[i];
         sumSqL += valL * valL;

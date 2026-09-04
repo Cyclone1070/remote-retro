@@ -10,6 +10,8 @@ pub const BLOCKS_Y: usize = GBA_HEIGHT / BLOCK_SIZE; // 20
 pub const TOTAL_BLOCKS: usize = BLOCKS_X * BLOCKS_Y; // 600
 pub const BLOCK_PIXELS: usize = BLOCK_SIZE * BLOCK_SIZE; // 64
 
+pub const DICT_CACHE_SIZE: usize = 4096;
+
 pub struct PaletteEncoder {
     color_map: HashMap<u16, u8>,
     pal_table: Vec<u16>,
@@ -18,6 +20,8 @@ pub struct PaletteEncoder {
     pal_payload: Vec<u8>,
     prev_frame: Vec<u16>,
     delta_payload: Vec<u8>,
+    tile_dict: HashMap<[u16; BLOCK_PIXELS], u16>,
+    cache_head: u16,
     frame_counter: u32,
 }
 
@@ -30,7 +34,9 @@ impl PaletteEncoder {
             nibble_packed: vec![0u8; TOTAL_PIXELS / 2],
             pal_payload: Vec::with_capacity(2 + 512 + TOTAL_PIXELS),
             prev_frame: vec![0u16; TOTAL_PIXELS],
-            delta_payload: Vec::with_capacity(2 + TOTAL_BLOCKS * (2 + BLOCK_PIXELS * 2)),
+            delta_payload: Vec::with_capacity(2 + TOTAL_BLOCKS * (3 + BLOCK_PIXELS * 2)),
+            tile_dict: HashMap::with_capacity(DICT_CACHE_SIZE),
+            cache_head: 0,
             frame_counter: 0,
         }
     }
@@ -65,12 +71,67 @@ impl PaletteEncoder {
                     if is_changed {
                         changed_blocks += 1;
                         self.delta_payload.extend_from_slice(&b_idx.to_le_bytes());
+
+                        let mut tile = [0u16; BLOCK_PIXELS];
                         for py in 0..BLOCK_SIZE {
                             let y = by * BLOCK_SIZE + py;
                             for px in 0..BLOCK_SIZE {
                                 let x = bx * BLOCK_SIZE + px;
-                                let p = y * GBA_WIDTH + x;
-                                self.delta_payload.extend_from_slice(&raw_frame[p].to_le_bytes());
+                                tile[py * BLOCK_SIZE + px] = raw_frame[y * GBA_WIDTH + x];
+                            }
+                        }
+
+                        // Mode 0: Check if solid color
+                        let first = tile[0];
+                        let is_solid = tile.iter().all(|&c| c == first);
+                        if is_solid {
+                            self.delta_payload.push(0); // Mode 0: Solid
+                            self.delta_payload.extend_from_slice(&first.to_le_bytes());
+                        } else if let Some(&cache_id) = self.tile_dict.get(&tile) {
+                            // Mode 1: Dynamic Dictionary Cache Hit
+                            self.delta_payload.push(1); // Mode 1: Cache Hit
+                            self.delta_payload.extend_from_slice(&cache_id.to_le_bytes());
+                        } else {
+                            // Cache miss: assign next cache ID in FIFO ring
+                            let cache_id = self.cache_head;
+                            self.cache_head = (self.cache_head + 1) % (DICT_CACHE_SIZE as u16);
+                            self.tile_dict.insert(tile, cache_id);
+
+                            // Inspect palette size of tile
+                            let mut ucolors = Vec::with_capacity(16);
+                            let mut cmap = HashMap::with_capacity(16);
+                            let mut fits_16 = true;
+
+                            for &c in &tile {
+                                if !cmap.contains_key(&c) {
+                                    if ucolors.len() < 16 {
+                                        cmap.insert(c, ucolors.len() as u8);
+                                        ucolors.push(c);
+                                    } else {
+                                        fits_16 = false;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if fits_16 {
+                                // Mode 2: 4bpp nibble packed tile
+                                self.delta_payload.push(2);
+                                self.delta_payload.push(ucolors.len() as u8);
+                                for c in &ucolors {
+                                    self.delta_payload.extend_from_slice(&c.to_le_bytes());
+                                }
+                                for i in 0..32 {
+                                    let c0 = cmap[&tile[i * 2]];
+                                    let c1 = cmap[&tile[i * 2 + 1]];
+                                    self.delta_payload.push((c0 & 0x0F) | ((c1 & 0x0F) << 4));
+                                }
+                            } else {
+                                // Mode 3: Raw 64 RGB555 pixels
+                                self.delta_payload.push(3);
+                                for &p in &tile {
+                                    self.delta_payload.extend_from_slice(&p.to_le_bytes());
+                                }
                             }
                         }
                     }
@@ -86,7 +147,9 @@ impl PaletteEncoder {
             }
         }
 
-        // Full Keyframe Palette Encoding
+        // Full Keyframe Palette Encoding (resets dictionary)
+        self.tile_dict.clear();
+        self.cache_head = 0;
         self.prev_frame.copy_from_slice(raw_frame);
         self.color_map.clear();
         self.pal_table.clear();
@@ -349,6 +412,157 @@ impl PpuState {
     }
 }
 
+pub struct TileCacheDecoder {
+    pub cache: Box<[[u16; BLOCK_PIXELS]; DICT_CACHE_SIZE]>,
+    pub cache_head: u16,
+    pub screen: Vec<u16>,
+}
+
+impl TileCacheDecoder {
+    pub fn new() -> Self {
+        Self {
+            cache: Box::new([[0u16; BLOCK_PIXELS]; DICT_CACHE_SIZE]),
+            cache_head: 0,
+            screen: vec![0u16; TOTAL_PIXELS],
+        }
+    }
+
+    pub fn reset_cache(&mut self) {
+        self.cache_head = 0;
+    }
+
+    pub fn decode(&mut self, flag: u8, video_payload: &[u8]) -> Result<&[u16], String> {
+        let decomp = lz4_flex::decompress_size_prepended(video_payload)
+            .map_err(|e| format!("LZ4: {}", e))?;
+
+        match flag {
+            4 => {
+                self.reset_cache();
+                if decomp.len() < 2 { return Err("Short 4bpp".into()); }
+                let pal_len = u16::from_le_bytes(decomp[0..2].try_into().unwrap()) as usize;
+                if decomp.len() < 2 + pal_len * 2 + TOTAL_PIXELS / 2 { return Err("Short 4bpp payload".into()); }
+                let pal = unsafe {
+                    std::slice::from_raw_parts(decomp[2..2 + pal_len * 2].as_ptr() as *const u16, pal_len)
+                };
+                let packed = &decomp[2 + pal_len * 2..];
+                for i in 0..TOTAL_PIXELS / 2 {
+                    let b = packed[i];
+                    self.screen[i * 2] = pal[(b & 0x0F) as usize];
+                    self.screen[i * 2 + 1] = pal[((b >> 4) & 0x0F) as usize];
+                }
+                Ok(&self.screen)
+            }
+            2 => {
+                self.reset_cache();
+                if decomp.len() < 2 { return Err("Short 8bpp".into()); }
+                let pal_len = u16::from_le_bytes(decomp[0..2].try_into().unwrap()) as usize;
+                if decomp.len() < 2 + pal_len * 2 + TOTAL_PIXELS { return Err("Short 8bpp payload".into()); }
+                let pal = unsafe {
+                    std::slice::from_raw_parts(decomp[2..2 + pal_len * 2].as_ptr() as *const u16, pal_len)
+                };
+                let indices = &decomp[2 + pal_len * 2..];
+                for p in 0..TOTAL_PIXELS {
+                    self.screen[p] = pal[indices[p] as usize];
+                }
+                Ok(&self.screen)
+            }
+            1 => {
+                self.reset_cache();
+                if decomp.len() != TOTAL_PIXELS * 2 { return Err("Raw frame size mismatch".into()); }
+                let raw_pixels = unsafe {
+                    std::slice::from_raw_parts(decomp.as_ptr() as *const u16, TOTAL_PIXELS)
+                };
+                self.screen.copy_from_slice(raw_pixels);
+                Ok(&self.screen)
+            }
+            8 => {
+                if decomp.len() < 2 { return Err("Short delta header".into()); }
+                let num_blocks = u16::from_le_bytes(decomp[0..2].try_into().unwrap()) as usize;
+                let mut offset = 2;
+
+                for _ in 0..num_blocks {
+                    if offset + 3 > decomp.len() { return Err("Truncated block header".into()); }
+                    let b_idx = u16::from_le_bytes(decomp[offset..offset + 2].try_into().unwrap()) as usize;
+                    let mode = decomp[offset + 2];
+                    offset += 3;
+
+                    let bx = (b_idx % BLOCKS_X) * BLOCK_SIZE;
+                    let by = (b_idx / BLOCKS_X) * BLOCK_SIZE;
+
+                    let mut tile = [0u16; BLOCK_PIXELS];
+
+                    match mode {
+                        0 => {
+                            // Mode 0: Solid
+                            if offset + 2 > decomp.len() { return Err("Truncated solid block".into()); }
+                            let c = u16::from_le_bytes(decomp[offset..offset + 2].try_into().unwrap());
+                            offset += 2;
+                            tile.fill(c);
+                        }
+                        1 => {
+                            // Mode 1: Cache Hit
+                            if offset + 2 > decomp.len() { return Err("Truncated cache hit".into()); }
+                            let cache_id = u16::from_le_bytes(decomp[offset..offset + 2].try_into().unwrap()) as usize;
+                            offset += 2;
+                            if cache_id >= DICT_CACHE_SIZE { return Err("Cache ID out of bounds".into()); }
+                            tile = self.cache[cache_id];
+                        }
+                        2 => {
+                            // Mode 2: 4bpp tile miss
+                            if offset + 1 > decomp.len() { return Err("Truncated 4bpp pal_len".into()); }
+                            let pal_len = decomp[offset] as usize;
+                            offset += 1;
+                            if offset + pal_len * 2 + 32 > decomp.len() { return Err("Truncated 4bpp tile".into()); }
+                            let pal = unsafe {
+                                std::slice::from_raw_parts(decomp[offset..offset + pal_len * 2].as_ptr() as *const u16, pal_len)
+                            };
+                            offset += pal_len * 2;
+                            let packed = &decomp[offset..offset + 32];
+                            offset += 32;
+
+                            for i in 0..32 {
+                                let b = packed[i];
+                                let c0 = (b & 0x0F) as usize;
+                                let c1 = ((b >> 4) & 0x0F) as usize;
+                                tile[i * 2] = if c0 < pal_len { pal[c0] } else { 0 };
+                                tile[i * 2 + 1] = if c1 < pal_len { pal[c1] } else { 0 };
+                            }
+
+                            let head = self.cache_head as usize;
+                            self.cache[head] = tile;
+                            self.cache_head = (self.cache_head + 1) % (DICT_CACHE_SIZE as u16);
+                        }
+                        3 => {
+                            // Mode 3: Raw tile miss
+                            if offset + BLOCK_PIXELS * 2 > decomp.len() { return Err("Truncated raw block".into()); }
+                            let raw = unsafe {
+                                std::slice::from_raw_parts(decomp[offset..offset + BLOCK_PIXELS * 2].as_ptr() as *const u16, BLOCK_PIXELS)
+                            };
+                            offset += BLOCK_PIXELS * 2;
+                            tile.copy_from_slice(raw);
+
+                            let head = self.cache_head as usize;
+                            self.cache[head] = tile;
+                            self.cache_head = (self.cache_head + 1) % (DICT_CACHE_SIZE as u16);
+                        }
+                        _ => return Err("Invalid block mode".into()),
+                    }
+
+                    for py in 0..BLOCK_SIZE {
+                        let y = by + py;
+                        for px in 0..BLOCK_SIZE {
+                            let x = bx + px;
+                            self.screen[y * GBA_WIDTH + x] = tile[py * BLOCK_SIZE + px];
+                        }
+                    }
+                }
+                Ok(&self.screen)
+            }
+            _ => Err("Unknown flag".into()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,9 +632,13 @@ mod tests {
     #[test]
     fn test_delta_tile_block_roundtrip() {
         let mut encoder = PaletteEncoder::new();
+        let mut decoder = TileCacheDecoder::new();
+
         let frame1 = vec![0x1234u16; TOTAL_PIXELS];
-        let (flag1, _) = encoder.encode(&frame1);
+        let (flag1, comp1) = encoder.encode(&frame1);
         assert_eq!(flag1, 4, "Initial frame is keyframe");
+        let dec1 = decoder.decode(flag1, &comp1).unwrap();
+        assert_eq!(dec1, frame1.as_slice(), "Keyframe must be bit-exact");
 
         // Move a sprite in block 15
         let mut frame2 = frame1.clone();
@@ -431,32 +649,65 @@ mod tests {
             }
         }
 
-        let (flag2, compressed) = encoder.encode(&frame2);
+        let (flag2, comp2) = encoder.encode(&frame2);
         assert_eq!(flag2, 8, "Small update must trigger Delta Block encoding");
+        let dec2 = decoder.decode(flag2, &comp2).unwrap();
+        assert_eq!(dec2, frame2.as_slice(), "Delta Block decoding must be 100% bit-exact");
+    }
 
-        let decomp = lz4_flex::decompress_size_prepended(&compressed).unwrap();
-        let num_blocks = u16::from_le_bytes(decomp[0..2].try_into().unwrap()) as usize;
-        assert_eq!(num_blocks, 1, "Exactly 1 block should be modified");
+    #[test]
+    fn test_tile_cache_hit_and_solid_roundtrip() {
+        let mut encoder = PaletteEncoder::new();
+        let mut decoder = TileCacheDecoder::new();
 
-        let block_idx = u16::from_le_bytes(decomp[2..4].try_into().unwrap()) as usize;
-        assert_eq!(block_idx, 15);
+        // Frame 1: Black keyframe
+        let frame1 = vec![0x0000u16; TOTAL_PIXELS];
+        let (flag1, comp1) = encoder.encode(&frame1);
+        let dec1 = decoder.decode(flag1, &comp1).unwrap();
+        assert_eq!(dec1, frame1.as_slice());
 
-        let mut reconstructed = frame1.clone();
-        let bx = block_idx % BLOCKS_X;
-        let by = block_idx / BLOCKS_X;
-        let block_data = unsafe {
-            std::slice::from_raw_parts(decomp[4..4 + BLOCK_PIXELS * 2].as_ptr() as *const u16, BLOCK_PIXELS)
-        };
-
-        for py in 0..BLOCK_SIZE {
-            let y = by * BLOCK_SIZE + py;
-            for px in 0..BLOCK_SIZE {
-                let x = bx * BLOCK_SIZE + px;
-                reconstructed[y * GBA_WIDTH + x] = block_data[py * BLOCK_SIZE + px];
+        // Frame 2: Introduce a solid red block at block 10 (Mode 0: Solid)
+        let mut frame2 = frame1.clone();
+        for py in 0..8 {
+            for px in 0..8 {
+                frame2[py * GBA_WIDTH + (10 * 8 + px)] = 0xF800; // Red
             }
         }
+        let (flag2, comp2) = encoder.encode(&frame2);
+        assert_eq!(flag2, 8);
+        let dec2 = decoder.decode(flag2, &comp2).unwrap();
+        assert_eq!(dec2, frame2.as_slice());
 
-        assert_eq!(frame2, reconstructed, "Delta Block decoding must be 100% bit-exact");
+        // Frame 3: Introduce a multi-color pattern in block 20 (Mode 2: 4bpp Miss -> Populates cache)
+        let mut frame3 = frame2.clone();
+        for py in 0..8 {
+            for px in 0..8 {
+                let color = if (px + py) % 2 == 0 { 0x07E0 } else { 0x001F };
+                frame3[py * GBA_WIDTH + (20 * 8 + px)] = color;
+            }
+        }
+        let (flag3, comp3) = encoder.encode(&frame3);
+        assert_eq!(flag3, 8);
+        let dec3 = decoder.decode(flag3, &comp3).unwrap();
+        assert_eq!(dec3, frame3.as_slice());
+
+        // Frame 4: Copy that EXACT same pattern to block 25 (Mode 1: Cache Hit!)
+        let mut frame4 = frame3.clone();
+        for py in 0..8 {
+            for px in 0..8 {
+                let color = if (px + py) % 2 == 0 { 0x07E0 } else { 0x001F };
+                frame4[py * GBA_WIDTH + (25 * 8 + px)] = color;
+            }
+        }
+        let (flag4, comp4) = encoder.encode(&frame4);
+        assert_eq!(flag4, 8);
+
+        // Verify that Frame 4's payload is tiny (< 25 bytes decompressed for 1 cache hit block)
+        let decomp4 = lz4_flex::decompress_size_prepended(&comp4).unwrap();
+        assert!(decomp4.len() <= 10, "Cache Hit block must be <= 10 bytes decompressed, got {}", decomp4.len());
+
+        let dec4 = decoder.decode(flag4, &comp4).unwrap();
+        assert_eq!(dec4, frame4.as_slice(), "Cache Hit must be 100% bit-exact");
     }
 
     #[test]
