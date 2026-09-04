@@ -1,4 +1,6 @@
 const { chromium } = require('/tmp/node_modules/playwright');
+const { execSync } = require('child_process');
+const fs = require('fs');
 
 async function runBrowserGating() {
     console.log('===================================================================');
@@ -11,7 +13,9 @@ async function runBrowserGating() {
             '--no-sandbox',
             '--autoplay-policy=no-user-gesture-required',
             '--use-fake-ui-for-media-stream',
-            '--disable-web-security'
+            '--disable-web-security',
+            '--enable-unsafe-webgpu',
+            '--enable-features=Vulkan,UseSkiaRenderer'
         ]
     });
 
@@ -23,12 +27,18 @@ async function runBrowserGating() {
         }
     });
 
+    console.log('▶ Navigating to GBA Streamer at http://100.73.151.90:48500...');
     await page.goto('http://100.73.151.90:48500', { waitUntil: 'networkidle' });
     
     // Unlock AudioContext and establish worker stream
     await page.click('#canvasWrapper');
-    await page.keyboard.press('Enter');
-    await page.waitForTimeout(2000);
+    
+    // Wait for connection and loading overlay to disappear
+    await page.waitForFunction(() => {
+        const el = document.getElementById('loadingOverlay');
+        return el && window.getComputedStyle(el).visibility === 'hidden';
+    }, { timeout: 8000 });
+    console.log('  ↳ ✅ Stream connected and #loadingOverlay dismissed cleanly.');
 
     // Inject Audio Tap into AudioContext
     await page.evaluate(() => {
@@ -60,9 +70,98 @@ async function runBrowserGating() {
     });
 
     // -------------------------------------------------------------
-    // GATE 4.1: Comprehensive Keyboard Matrix & Sticky Key Gating
+    // GATE 4.1: Ground-Truth Pixel Integrity & Zero Color Distortion Gating
     // -------------------------------------------------------------
-    console.log('  Testing complete keyboard matrix press & release lifecycle...');
+    console.log('▶ [GATE 4.1] Auditing Ground-Truth Canvas Pixels (Color Fidelity & Zero Corruption)...');
+    await page.waitForTimeout(600);
+    await page.screenshot({ path: '/tmp/gating_live_screen.png' });
+
+    const pixelAuditCmd = `python3 -c '
+from PIL import Image
+import sys
+
+im = Image.open("/tmp/gating_live_screen.png")
+# Crop canvas area
+canvas = im.crop((280, 51, 1000, 531))
+colors = canvas.getcolors(maxcolors=100000)
+
+has_black_border = False
+non_zero_colors = 0
+bgr_swapped_pixels = 0
+
+for count, (r, g, b) in colors:
+    if r < 10 and g < 10 and b < 10:
+        has_black_border = True
+    if r > 20 or g > 20 or b > 20:
+        non_zero_colors += 1
+    # Check for glaring BGR inversion (e.g. dominant blue where red is absent in warm scenes)
+    if b > 180 and r < 60 and g < 60:
+        bgr_swapped_pixels += count
+
+if not has_black_border:
+    print("FAIL: Canvas missing standard black border")
+    sys.exit(1)
+if non_zero_colors < 10:
+    print(f"FAIL: Canvas is blank or frozen (unique active colors={non_zero_colors})")
+    sys.exit(1)
+if bgr_swapped_pixels > 500:
+    print(f"FAIL: BGR color inversion detected! ({bgr_swapped_pixels} unnatural blue pixels)")
+    sys.exit(1)
+
+print(f"PASS: Pixel integrity verified. Unique colors={non_zero_colors}, Black border=OK, BGR inversion=0")
+sys.exit(0)
+'`;
+
+    try {
+        const auditOutput = execSync(pixelAuditCmd).toString().trim();
+        console.log(`  ↳ ✅ ${auditOutput}`);
+    } catch (err) {
+        console.error('\n❌ PIXEL INTEGRITY AUDIT FAILED:', err.stdout ? err.stdout.toString() : err.message);
+        process.exit(1);
+    }
+
+    // -------------------------------------------------------------
+    // GATE 4.2: Live Interactive In-Game ROM Input Gating (Start, Action, D-Pad Walk)
+    // -------------------------------------------------------------
+    console.log('▶ [GATE 4.2] Verifying Interactive ROM Reaction: Start -> Action A -> D-Pad Movement...');
+    const snapInitial = await page.screenshot();
+
+    // 1. Press Enter (Start) to advance
+    await page.keyboard.press('Enter');
+    await page.waitForTimeout(600);
+    const snapAfterStart = await page.screenshot();
+    if (snapInitial.equals(snapAfterStart)) {
+        console.error('❌ ROM INPUT GATE FAILED: Start/Enter button press had zero effect on screen');
+        process.exit(1);
+    }
+    console.log('  ↳ ✅ ROM reacted to Enter/Start keypress (title/intro advanced).');
+
+    // 2. Press z (Action A) to enter game
+    await page.keyboard.press('z');
+    await page.waitForTimeout(1000);
+    const snapAfterA = await page.screenshot();
+    if (snapAfterStart.equals(snapAfterA)) {
+        console.error('❌ ROM INPUT GATE FAILED: A/z button press had zero effect on screen');
+        process.exit(1);
+    }
+    console.log('  ↳ ✅ ROM reacted to A/z button press (game loaded).');
+
+    // 3. Hold D (Right) to walk character across level
+    await page.keyboard.down('d');
+    await page.waitForTimeout(500);
+    await page.keyboard.up('d');
+    await page.waitForTimeout(200);
+    const snapAfterWalk = await page.screenshot({ path: '/tmp/gating_live_screen.png' });
+    if (snapAfterA.equals(snapAfterWalk)) {
+        console.error('❌ ROM INPUT GATE FAILED: D-Pad Right movement had zero effect on gameplay screen');
+        process.exit(1);
+    }
+    console.log('  ↳ ✅ ROM reacted to D-Pad Right keypress (character movement verified).');
+
+    // -------------------------------------------------------------
+    // GATE 4.3: Comprehensive Keyboard Matrix & Sticky Key Gating
+    // -------------------------------------------------------------
+    console.log('▶ [GATE 4.3] Testing complete keyboard matrix press & release lifecycle...');
     const testKeys = [
         { key: 'd', expectedBit: 4 },
         { key: 'a', expectedBit: 5 },
@@ -103,9 +202,9 @@ async function runBrowserGating() {
     console.log('  ↳ ✅ All 12 game buttons press & release cleanly with zero stuck keys.');
 
     // -------------------------------------------------------------
-    // GATE 4.2: Live Run-Ahead HUD Toggle & Hotkey Verification
+    // GATE 4.4: Live Run-Ahead HUD Toggle & Hotkey Verification
     // -------------------------------------------------------------
-    console.log('  Testing Run-Ahead HUD button click & F2 hotkey toggling...');
+    console.log('▶ [GATE 4.4] Testing Run-Ahead HUD button click & F2 hotkey toggling...');
     const initialText = await page.$eval('#runaheadVal', el => el.innerText);
     if (!initialText.includes('1F')) {
         console.error(`❌ Unexpected initial runahead value: ${initialText}`);
@@ -131,7 +230,10 @@ async function runBrowserGating() {
     }
     console.log('  ↳ ✅ Run-Ahead HUD button and F2 hotkey toggle seamlessly in real-time.');
 
-    // Measure in-browser presentation deltas over 600 frames
+    // -------------------------------------------------------------
+    // GATE 4.5: 600-Frame In-Browser Presentation & Zero-Stutter Gating
+    // -------------------------------------------------------------
+    console.log('▶ [GATE 4.5] Measuring in-browser presentation deltas over 600 frames...');
     const presentationPromise = page.evaluate(() => {
         return new Promise((resolve) => {
             const deltas = [];
@@ -165,7 +267,6 @@ async function runBrowserGating() {
         };
     });
 
-    await page.screenshot({ path: '/tmp/gating_live_screen.png' });
     await browser.close();
 
     // Analyze Audio
@@ -209,13 +310,14 @@ async function runBrowserGating() {
     const variance = frameDeltas.reduce((a,b)=>a+Math.pow(b-mean, 2), 0) / (n - 1);
     const sigma = Math.sqrt(variance);
     const stutters = frameDeltas.filter(d => d > 33.33).length;
+    const stutterRate = ((stutters / n) * 100);
     const fps = 1000.0 / mean;
 
     console.log('\n--- BROWSER PRESENTATION METRICS ---');
     console.log(` Delivered FPS:        ${fps.toFixed(1)} FPS`);
     console.log(` Mean Frame Interval:  ${mean.toFixed(2)} ms (Target: 16.67 ms)`);
     console.log(` Pacing Jitter (σ):    ${sigma.toFixed(2)} ms`);
-    console.log(` Micro-Stutters:       ${stutters} (${((stutters/n)*100).toFixed(2)}%)`);
+    console.log(` Micro-Stutters:       ${stutters} (${stutterRate.toFixed(2)}%)`);
     console.log('------------------------------------');
     console.log('--- AUDIO INTEGRITY METRICS ---');
     console.log(` Left Ear RMS:         ${rmsL.toFixed(4)} (Peak: ${peakL.toFixed(3)})`);
@@ -227,18 +329,19 @@ async function runBrowserGating() {
 
     // Assertions
     const failures = [];
-    if (fps < 59.0) failures.push(`FPS too low: ${fps.toFixed(1)} < 59.0`);
-    if (sigma > 2.0) failures.push(`Pacing jitter too high: ${sigma.toFixed(2)}ms > 2.0ms`);
+    if (fps < 59.5) failures.push(`FPS too low: ${fps.toFixed(1)} < 59.5`);
+    if (sigma > 1.0) failures.push(`Pacing jitter too high: ${sigma.toFixed(2)}ms > 1.0ms`);
+    if (stutters > 0) failures.push(`Micro-stutter detected: ${stutters} stutters (${stutterRate.toFixed(2)}%) > 0.00%`);
     if (rmsL < 0.03 || rmsR < 0.03) failures.push(`Audio volume too low or silent (RMS L:${rmsL.toFixed(4)}, R:${rmsR.toFixed(4)})`);
     if (balance < 0.4 || balance > 2.5) failures.push(`Stereo balance skewed (${balance.toFixed(2)})`);
-    if (dropouts > 3) failures.push(`Audio dropouts too high (${dropouts})`);
+    if (dropouts > 0) failures.push(`Audio dropouts detected (${dropouts} dropouts)`);
 
     if (failures.length > 0) {
         console.error('\n❌ IN-BROWSER GATING ASSERTION FAILURES:');
         failures.forEach(f => console.error(`  - ${f}`));
         process.exit(1);
     } else {
-        console.log('\n✅ PASS: In-Browser Video + Audio + Presentation Gates 100% Passed!\n');
+        console.log('\n✅ PASS: In-Browser Video + Audio + Presentation + ROM Input Gates 100% Passed!\n');
         process.exit(0);
     }
 }

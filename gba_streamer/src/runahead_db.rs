@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -62,12 +62,25 @@ fn save_disk_cache(map: &HashMap<String, u8>) {
     let _ = fs::write(&path, out);
 }
 
-/// Verified pre-compiled database of measured GBA ROMs.
-pub fn lookup_verified_db(game_code: &str) -> Option<u8> {
-    match game_code {
-        "SUSHI-DEMO" | "UNKN" => Some(1),
-        _ => None,
+/// Checks if this game has a cached or user-configured runahead setting in ~/.config/remote_retro
+pub fn lookup_cached(game_code: &str) -> Option<u8> {
+    if let Ok(mut guard) = RUNTIME_CACHE.lock() {
+        if guard.is_none() {
+            let mut map = HashMap::new();
+            load_disk_cache_into_map(&mut map);
+            *guard = Some(map);
+        }
+        if let Some(ref map) = *guard {
+            return map.get(game_code).copied();
+        }
     }
+    None
+}
+
+/// Verified pre-compiled database of measured GBA ROMs.
+pub fn lookup_verified_db(_game_code: &str) -> Option<u8> {
+    // Only verified database entries
+    None
 }
 
 /// Reads the GBA ROM header and retrieves calibrated lag.
@@ -174,9 +187,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_lookup_verified_db() {
-        assert_eq!(lookup_verified_db("SUSHI-DEMO"), Some(1));
-        assert_eq!(lookup_verified_db("NON_EXISTENT"), None);
+    fn test_lookup_cached() {
+        cache_measured_runahead("TEST_GAME_1".to_string(), 0);
+        assert_eq!(lookup_cached("TEST_GAME_1"), Some(0));
+        assert_eq!(lookup_cached("NON_EXISTENT_XYZ"), None);
     }
 
     #[test]

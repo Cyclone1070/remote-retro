@@ -159,10 +159,20 @@
         }
 
         let gl = null;
+        let gpuDevice = null;
+        let gpuContext = null;
+        let gpuPipeline = null;
+        let gpuTexture = null;
+        let gpuBindGroup = null;
+        let isWebGPU = false;
+
         let indexTex = null;
         let paletteTex = null;
+        let frameRgbaTex = null;
         let paletteRgbaBuf = new Uint8Array(256 * 4);
         let unpackedIndicesBuf = new Uint8Array(38400);
+        let fullFrameRgba = new Uint8Array(240 * 160 * 4);
+        let fullFrameRgb565 = new Uint16Array(240 * 160);
 
         let ws = null;
         let isReady = false;
@@ -173,8 +183,98 @@
         let latestHostMs = 1.2;
         let activeRunahead = 1;
 
-        const vSyncQueue = [];
-        const VSYNC_PACING_CUSHION_MS = 16.666;
+        async function initGraphics(canvas) {
+            // Attempt WebGPU first
+            if (typeof navigator !== 'undefined' && navigator.gpu) {
+                try {
+                    const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+                    if (adapter) {
+                        gpuDevice = await adapter.requestDevice();
+                        gpuContext = canvas.getContext('webgpu');
+                        if (gpuContext) {
+                            const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
+                            gpuContext.configure({
+                                device: gpuDevice,
+                                format: canvasFormat,
+                                alphaMode: 'opaque'
+                            });
+
+                            const shaderModule = gpuDevice.createShaderModule({
+                                code: `
+                                    struct VertexOutput {
+                                        @builtin(position) position: vec4<f32>,
+                                        @location(0) uv: vec2<f32>,
+                                    };
+
+                                    @vertex
+                                    fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
+                                        var pos = array<vec2<f32>, 6>(
+                                            vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0),
+                                            vec2<f32>(-1.0, 1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0)
+                                        );
+                                        var uv = array<vec2<f32>, 6>(
+                                            vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 0.0),
+                                            vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(1.0, 0.0)
+                                        );
+                                        var output: VertexOutput;
+                                        output.position = vec4<f32>(pos[vertexIndex], 0.0, 1.0);
+                                        output.uv = uv[vertexIndex];
+                                        return output;
+                                    }
+
+                                    @group(0) @binding(0) var gbaTexture: texture_2d<f32>;
+                                    @group(0) @binding(1) var gbaSampler: sampler;
+
+                                    @fragment
+                                    fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+                                        return textureSample(gbaTexture, gbaSampler, in.uv);
+                                    }
+                                `
+                            });
+
+                            gpuTexture = gpuDevice.createTexture({
+                                size: [240, 160, 1],
+                                format: 'rgba8unorm',
+                                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+                            });
+
+                            const sampler = gpuDevice.createSampler({
+                                magFilter: 'nearest',
+                                minFilter: 'nearest',
+                            });
+
+                            gpuPipeline = gpuDevice.createRenderPipeline({
+                                layout: 'auto',
+                                vertex: { module: shaderModule, entryPoint: 'vs_main' },
+                                fragment: {
+                                    module: shaderModule,
+                                    entryPoint: 'fs_main',
+                                    targets: [{ format: canvasFormat }]
+                                },
+                                primitive: { topology: 'triangle-list' }
+                            });
+
+                            gpuBindGroup = gpuDevice.createBindGroup({
+                                layout: gpuPipeline.getBindGroupLayout(0),
+                                entries: [
+                                    { binding: 0, resource: gpuTexture.createView() },
+                                    { binding: 1, resource: sampler }
+                                ]
+                            });
+
+                            isWebGPU = true;
+                            postMessage({ type: 'engine_mode', engine: 'WebGPU (Hardware Accelerated)' });
+                            return;
+                        }
+                    }
+                } catch(e) {
+                    console.warn('WebGPU init failed, falling back to WebGL2', e);
+                }
+            }
+
+            // WebGL2 Fallback
+            initWebGL(canvas);
+        }
 
         function initWebGL(canvas) {
             gl = canvas.getContext('webgl2', { alpha: false, antialias: false, depth: false, stencil: false, powerPreference: 'high-performance' });
@@ -190,14 +290,11 @@
 
             const fsSource = `#version 300 es
                 precision mediump float;
-                precision mediump usampler2D;
                 in vec2 v_uv;
-                uniform usampler2D u_indexTex;
-                uniform sampler2D u_paletteTex;
+                uniform sampler2D u_frameTex;
                 out vec4 fragColor;
                 void main() {
-                    uint idx = texture(u_indexTex, v_uv).r;
-                    fragColor = texelFetch(u_paletteTex, ivec2(int(idx), 0), 0);
+                    fragColor = texture(u_frameTex, v_uv);
                 }
             `;
 
@@ -225,28 +322,17 @@
             gl.enableVertexAttribArray(aPos);
             gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
 
-            // Index Texture
-            indexTex = gl.createTexture();
+            frameRgbaTex = gl.createTexture();
             gl.activeTexture(gl.TEXTURE0);
-            gl.bindTexture(gl.TEXTURE_2D, indexTex);
+            gl.bindTexture(gl.TEXTURE_2D, frameRgbaTex);
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
             gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-            gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8UI, 240, 160, 0, gl.RED_INTEGER, gl.UNSIGNED_BYTE, null);
-            gl.uniform1i(gl.getUniformLocation(program, 'u_indexTex'), 0);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 240, 160, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+            gl.uniform1i(gl.getUniformLocation(program, 'u_frameTex'), 0);
 
-            // Palette Texture
-            paletteTex = gl.createTexture();
-            gl.activeTexture(gl.TEXTURE1);
-            gl.bindTexture(gl.TEXTURE_2D, paletteTex);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-            gl.uniform1i(gl.getUniformLocation(program, 'u_paletteTex'), 1);
-
-            requestAnimationFrame(renderLoop);
+            postMessage({ type: 'engine_mode', engine: 'WebGL2 (Hardware Accelerated)' });
         }
 
         function renderFrame(bytes) {
@@ -264,51 +350,109 @@
             const audioLen = bytes[33] | (bytes[34] << 8);
             const videoPayload = bytes.subarray(35 + audioLen);
 
-            if (flag === 4) {
+            if (flag === 8) {
+                // Flag 8: Delta Tile Blocks (Sub-MTU Low Bandwidth)
+                const decomp = lz4Decompress(videoPayload, 2 + 600 * (2 + 128));
+                const numBlocks = decomp[0] | (decomp[1] << 8);
+                let offset = 2;
+
+                for (let b = 0; b < numBlocks; b++) {
+                    const bIdx = decomp[offset] | (decomp[offset + 1] << 8);
+                    offset += 2;
+                    const bx = (bIdx % 30) * 8;
+                    const by = Math.floor(bIdx / 30) * 8;
+
+                    for (let py = 0; py < 8; py++) {
+                        const y = by + py;
+                        for (let px = 0; px < 8; px++) {
+                            const x = bx + px;
+                            const p16 = decomp[offset] | (decomp[offset + 1] << 8);
+                            offset += 2;
+                            const pIdx = y * 240 + x;
+                            fullFrameRgb565[pIdx] = p16;
+                            fullFrameRgba[pIdx * 4 + 0] = (((p16 >> 11) & 0x1F) * 255 / 31) | 0;
+                            fullFrameRgba[pIdx * 4 + 1] = (((p16 >> 5) & 0x3F) * 255 / 63) | 0;
+                            fullFrameRgba[pIdx * 4 + 2] = ((p16 & 0x1F) * 255 / 31) | 0;
+                            fullFrameRgba[pIdx * 4 + 3] = 255;
+                        }
+                    }
+                }
+            } else if (flag === 4) {
+                // Flag 4: Nibble 4-bit Palette Keyframe
                 const decomp = lz4Decompress(videoPayload, 2 + 32 + 19200);
                 const palLen = decomp[0] | (decomp[1] << 8);
                 const pal16 = new Uint16Array(decomp.buffer, decomp.byteOffset + 2, palLen);
                 const packed = decomp.subarray(2 + palLen * 2);
 
-                for (let i = 0; i < palLen; i++) {
-                    const p = pal16[i];
-                    paletteRgbaBuf[i * 4 + 0] = (((p >> 11) & 0x1F) * 255 / 31) | 0; // RED (RGB565)
-                    paletteRgbaBuf[i * 4 + 1] = (((p >> 5) & 0x3F) * 255 / 63) | 0;  // GREEN (RGB565)
-                    paletteRgbaBuf[i * 4 + 2] = ((p & 0x1F) * 255 / 31) | 0;         // BLUE (RGB565)
-                    paletteRgbaBuf[i * 4 + 3] = 255;
-                }
-
                 for (let i = 0; i < 19200; i++) {
                     const b = packed[i];
-                    unpackedIndicesBuf[i * 2 + 0] = b & 0x0F;
-                    unpackedIndicesBuf[i * 2 + 1] = (b >> 4) & 0x0F;
+                    const idx0 = b & 0x0F;
+                    const idx1 = (b >> 4) & 0x0F;
+                    const p0 = pal16[idx0];
+                    const p1 = pal16[idx1];
+
+                    const pIdx0 = i * 2;
+                    const pIdx1 = i * 2 + 1;
+
+                    fullFrameRgb565[pIdx0] = p0;
+                    fullFrameRgba[pIdx0 * 4 + 0] = (((p0 >> 11) & 0x1F) * 255 / 31) | 0;
+                    fullFrameRgba[pIdx0 * 4 + 1] = (((p0 >> 5) & 0x3F) * 255 / 63) | 0;
+                    fullFrameRgba[pIdx0 * 4 + 2] = ((p0 & 0x1F) * 255 / 31) | 0;
+                    fullFrameRgba[pIdx0 * 4 + 3] = 255;
+
+                    fullFrameRgb565[pIdx1] = p1;
+                    fullFrameRgba[pIdx1 * 4 + 0] = (((p1 >> 11) & 0x1F) * 255 / 31) | 0;
+                    fullFrameRgba[pIdx1 * 4 + 1] = (((p1 >> 5) & 0x3F) * 255 / 63) | 0;
+                    fullFrameRgba[pIdx1 * 4 + 2] = ((p1 & 0x1F) * 255 / 31) | 0;
+                    fullFrameRgba[pIdx1 * 4 + 3] = 255;
                 }
-
-                gl.activeTexture(gl.TEXTURE1);
-                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, palLen, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, paletteRgbaBuf.subarray(0, palLen * 4));
-
-                gl.activeTexture(gl.TEXTURE0);
-                gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 240, 160, gl.RED_INTEGER, gl.UNSIGNED_BYTE, unpackedIndicesBuf);
-                gl.drawArrays(gl.TRIANGLES, 0, 6);
             } else if (flag === 2) {
+                // Flag 2: 8-bit Byte Palette Keyframe
                 const decomp = lz4Decompress(videoPayload, 2 + 512 + 38400);
                 const palLen = decomp[0] | (decomp[1] << 8);
                 const pal16 = new Uint16Array(decomp.buffer, decomp.byteOffset + 2, palLen);
                 const indices = decomp.subarray(2 + palLen * 2);
 
-                for (let i = 0; i < palLen; i++) {
-                    const p = pal16[i];
-                    paletteRgbaBuf[i * 4 + 0] = (((p >> 11) & 0x1F) * 255 / 31) | 0; // RED (RGB565)
-                    paletteRgbaBuf[i * 4 + 1] = (((p >> 5) & 0x3F) * 255 / 63) | 0;  // GREEN (RGB565)
-                    paletteRgbaBuf[i * 4 + 2] = ((p & 0x1F) * 255 / 31) | 0;         // BLUE (RGB565)
-                    paletteRgbaBuf[i * 4 + 3] = 255;
+                for (let i = 0; i < 38400; i++) {
+                    const idx = indices[i];
+                    const p = pal16[idx];
+                    fullFrameRgb565[i] = p;
+                    fullFrameRgba[i * 4 + 0] = (((p >> 11) & 0x1F) * 255 / 31) | 0;
+                    fullFrameRgba[i * 4 + 1] = (((p >> 5) & 0x3F) * 255 / 63) | 0;
+                    fullFrameRgba[i * 4 + 2] = ((p & 0x1F) * 255 / 31) | 0;
+                    fullFrameRgba[i * 4 + 3] = 255;
                 }
+            }
 
-                gl.activeTexture(gl.TEXTURE1);
-                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, palLen, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, paletteRgbaBuf.subarray(0, palLen * 4));
+            // Upload & Render to GPU
+            if (isWebGPU && gpuDevice && gpuContext) {
+                gpuDevice.queue.writeTexture(
+                    { texture: gpuTexture },
+                    fullFrameRgba,
+                    { bytesPerRow: 240 * 4, rowsPerImage: 160 },
+                    [240, 160]
+                );
 
+                const commandEncoder = gpuDevice.createCommandEncoder();
+                const textureView = gpuContext.getCurrentTexture().createView();
+                const renderPassDescriptor = {
+                    colorAttachments: [{
+                        view: textureView,
+                        clearValue: { r: 0.0, g: 0.0, b: 0.0, a: 1.0 },
+                        loadOp: 'clear',
+                        storeOp: 'store',
+                    }]
+                };
+
+                const passEncoder = commandEncoder.beginRenderPass(renderPassDescriptor);
+                passEncoder.setPipeline(gpuPipeline);
+                passEncoder.setBindGroup(0, gpuBindGroup);
+                passEncoder.draw(6);
+                passEncoder.end();
+                gpuDevice.queue.submit([commandEncoder.finish()]);
+            } else if (gl) {
                 gl.activeTexture(gl.TEXTURE0);
-                gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 240, 160, gl.RED_INTEGER, gl.UNSIGNED_BYTE, indices);
+                gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 240, 160, gl.RGBA, gl.UNSIGNED_BYTE, fullFrameRgba);
                 gl.drawArrays(gl.TRIANGLES, 0, 6);
             }
 
@@ -328,27 +472,17 @@
                     fps,
                     hostMs: latestHostMs.toFixed(2),
                     totalM2P: effectiveM2P.toFixed(1),
-                    netRtt: networkRtt.toFixed(1)
+                    netRtt: networkRtt.toFixed(1),
+                    runahead: activeRunahead
                 });
                 decompTimes = [];
             }
         }
 
-        function renderLoop() {
-            const now = performance.now();
-            if (vSyncQueue.length > 0) {
-                if (now >= vSyncQueue[0].targetTime || vSyncQueue.length >= 2) {
-                    const frame = vSyncQueue.shift();
-                    renderFrame(frame.bytes);
-                }
-            }
-            requestAnimationFrame(renderLoop);
-        }
-
-        self.onmessage = (e) => {
+        self.onmessage = async (e) => {
             const data = e.data;
             if (data.type === 'init') {
-                initWebGL(data.canvas);
+                await initGraphics(data.canvas);
                 
                 ws = new WebSocket(data.wsUrl);
                 ws.binaryType = 'arraybuffer';
@@ -356,7 +490,9 @@
                 ws.onmessage = (ev) => {
                     const bytes = new Uint8Array(ev.data);
                     if (bytes.length >= 35) {
-                        const now = performance.now();
+                        // Extract server-authoritative active runahead from header byte 31
+                        activeRunahead = bytes[31];
+
                         const audioLen = bytes[33] | (bytes[34] << 8);
                         if (audioLen > 0) {
                             try {
@@ -367,14 +503,8 @@
                             } catch(err) {}
                         }
 
-                        vSyncQueue.push({
-                            bytes: bytes,
-                            targetTime: now + VSYNC_PACING_CUSHION_MS
-                        });
-
-                        while (vSyncQueue.length > 3) {
-                            vSyncQueue.shift();
-                        }
+                        // Immediate zero-latency rendering to GPU
+                        renderFrame(bytes);
                     }
                 };
             } else if (data.type === 'input') {
@@ -526,12 +656,28 @@
                         readPos = (writePos - TARGET_CUSHION_SAMPLES + RING_SIZE) % RING_SIZE;
                     }
                 }
+            } else if (data.type === 'engine_mode') {
+                const titleEl = document.querySelector('h1');
+                if (titleEl) {
+                    titleEl.innerText = '⚡ GBA Streamer (' + data.engine + ')';
+                }
             } else if (data.type === 'stats') {
                 fpsEl.innerText = data.fps;
                 hostEl.innerText = data.hostMs + ' ms';
                 totalEl.innerText = data.totalM2P + ' ms';
                 netEl.innerText = data.netRtt + ' ms';
                 audioStatusEl.innerText = (window.getAudioQueueLength() / GBA_SAMPLE_RATE * 1000).toFixed(1) + ' ms';
+                
+                if (data.runahead !== undefined && !userManuallyToggled) {
+                    currentRunahead = data.runahead;
+                    if (currentRunahead > 0) {
+                        runaheadValEl.innerText = currentRunahead + 'F (ON)';
+                        runaheadValEl.className = 'hud-value highlight';
+                    } else {
+                        runaheadValEl.innerText = 'OFF (0F)';
+                        runaheadValEl.className = 'hud-value';
+                    }
+                }
             }
         };
 
@@ -570,11 +716,13 @@
         setInterval(updatePing, 1000);
         updatePing();
 
-        let currentRunahead = 1;
+        let currentRunahead = 0;
+        let userManuallyToggled = false;
         const runaheadValEl = document.getElementById('runaheadVal');
         const runaheadToggleEl = document.getElementById('runaheadToggle');
 
         function toggleRunahead() {
+            userManuallyToggled = true;
             currentRunahead = currentRunahead === 0 ? 1 : 0;
             if (currentRunahead > 0) {
                 runaheadValEl.innerText = currentRunahead + 'F (ON)';

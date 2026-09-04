@@ -82,6 +82,7 @@ async fn main() -> Result<()> {
     let mut clean_audio_frames = 0;
     let mut corrupt_frames = 0;
     let mut screen_buffer = vec![0u16; TOTAL_PIXELS];
+    let mut ppu_state = gba_streamer::codec::PpuState::new();
 
     println!("===================================================================");
     println!(" ⚡ AUDITED A/V SYNCHRONIZED LOSSLESS BENCHMARK (2,000 FRAMES) ");
@@ -161,6 +162,38 @@ async fn main() -> Result<()> {
                             }
                         }
                     }
+                } else if flag == 8 {
+                    if let Ok(decomp) = lz4_flex::decompress_size_prepended(video_payload) {
+                        if decomp.len() >= 2 {
+                            let num_blocks = u16::from_le_bytes(decomp[0..2].try_into().unwrap()) as usize;
+                            let mut offset = 2;
+                            let mut ok = true;
+                            for _ in 0..num_blocks {
+                                if offset + 2 + 128 > decomp.len() {
+                                    ok = false;
+                                    break;
+                                }
+                                let b_idx = u16::from_le_bytes(decomp[offset..offset + 2].try_into().unwrap()) as usize;
+                                offset += 2;
+                                let bx = (b_idx % 30) * 8;
+                                let by = (b_idx / 30) * 8;
+                                let block_slice = unsafe {
+                                    std::slice::from_raw_parts(decomp[offset..offset + 128].as_ptr() as *const u16, 64)
+                                };
+                                offset += 128;
+                                for py in 0..8 {
+                                    let y = by + py;
+                                    for px in 0..8 {
+                                        let x = bx + px;
+                                        screen_buffer[y * 240 + x] = block_slice[py * 8 + px];
+                                    }
+                                }
+                            }
+                            if ok {
+                                valid_video = true;
+                            }
+                        }
+                    }
                 } else if flag == 1 {
                     if let Ok(decomp) = lz4_flex::decompress_size_prepended(video_payload) {
                         if decomp.len() == TOTAL_PIXELS * 2 {
@@ -170,6 +203,10 @@ async fn main() -> Result<()> {
                             screen_buffer.copy_from_slice(src16);
                             valid_video = true;
                         }
+                    }
+                } else if flag == 16 {
+                    if ppu_state.apply_payload(video_payload).is_ok() {
+                        valid_video = true;
                     }
                 }
 

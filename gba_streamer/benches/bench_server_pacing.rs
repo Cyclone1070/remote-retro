@@ -18,16 +18,24 @@ async fn main() -> Result<()> {
     let mut count = 0;
 
     while count < total_samples {
-        if let Some(Ok(msg)) = read.next().await {
-            if msg.is_binary() {
-                let now = Instant::now();
-                let dt = now.duration_since(last_t).as_secs_f64() * 1000.0;
-                last_t = now;
+        match read.next().await {
+            Some(Ok(msg)) => {
+                if msg.is_binary() {
+                    let now = Instant::now();
+                    let dt = now.duration_since(last_t).as_secs_f64() * 1000.0;
+                    last_t = now;
 
-                count += 1;
-                if count > warmup_samples {
-                    intervals_ms.push(dt);
+                    count += 1;
+                    if count > warmup_samples {
+                        intervals_ms.push(dt);
+                    }
                 }
+            }
+            Some(Err(e)) => {
+                anyhow::bail!("WebSocket read error: {}", e);
+            }
+            None => {
+                anyhow::bail!("WebSocket connection closed prematurely after {} samples", count);
             }
         }
     }
