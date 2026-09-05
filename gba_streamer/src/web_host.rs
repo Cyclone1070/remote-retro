@@ -14,7 +14,7 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
     println!("=== Starting GBA WebHost (A/V Synchronized Bit-Exact Stream) ===");
     let mut core = RetroCore::load(&core_path, &rom_path)?;
 
-    let (tx, _rx) = tokio::sync::broadcast::channel::<Arc<Vec<u8>>>(64);
+    let (tx, _rx) = tokio::sync::broadcast::channel::<Arc<Vec<u8>>>(256);
     let tx_arc = Arc::new(tx);
     let tx_producer = tx_arc.clone();
 
@@ -164,11 +164,7 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
 
                     loop {
                         match client_rx.recv().await {
-                            Ok(mut packet) => {
-                                // Drain stale frames to guarantee zero queuing delay
-                                while let Ok(newer_packet) = client_rx.try_recv() {
-                                    packet = newer_packet;
-                                }
+                            Ok(packet) => {
                                 if ws_sender
                                     .send(warp::ws::Message::binary((*packet).clone()))
                                     .await
@@ -177,8 +173,8 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
                                     break;
                                 }
                             }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                // Dropped frames to catch up with slow connection, continue
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                eprintln!("⚠️ Client receiver lagged by {} frames", skipped);
                                 continue;
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -191,7 +187,15 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
         });
 
     let routes = html_route.or(ping_route).or(ws_route);
-    warp::serve(routes).run(addr).await;
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    println!("⚡ Socket TCP_NODELAY active on all incoming connections!");
+    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener).map(|res| {
+        if let Ok(ref stream) = res {
+            let _ = stream.set_nodelay(true);
+        }
+        res
+    });
+    warp::serve(routes).run_incoming(incoming).await;
 
     Ok(())
 }

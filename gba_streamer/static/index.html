@@ -341,7 +341,7 @@
             postMessage({ type: 'engine_mode', engine: 'WebGL2 (Hardware Accelerated)' });
         }
 
-        function renderFrame(bytes) {
+        function renderFrame(bytes, blitToGpu = true) {
             if (!isReady) {
                 isReady = true;
                 postMessage({ type: 'ready' });
@@ -535,6 +535,10 @@
                 }
             }
 
+            if (!blitToGpu) {
+                return;
+            }
+
             // Upload & Render to GPU
             if (isWebGPU && gpuDevice && gpuContext) {
                 gpuDevice.queue.writeTexture(
@@ -597,10 +601,41 @@
             }
         }
 
+        const frameQueue = [];
+        let animationFrameRunning = false;
+        let isBuffering = true;
+
+        function displayTick() {
+            requestAnimationFrame(displayTick);
+
+            if (isBuffering) {
+                if (frameQueue.length >= 2) {
+                    isBuffering = false;
+                } else {
+                    return;
+                }
+            }
+
+            if (frameQueue.length > 0) {
+                while (frameQueue.length > 2) {
+                    const oldBytes = frameQueue.shift();
+                    renderFrame(oldBytes, false);
+                }
+                const currentBytes = frameQueue.shift();
+                renderFrame(currentBytes, true);
+            } else {
+                isBuffering = true;
+            }
+        }
+
         self.onmessage = async (e) => {
             const data = e.data;
             if (data.type === 'init') {
                 await initGraphics(data.canvas);
+                if (!animationFrameRunning) {
+                    animationFrameRunning = true;
+                    requestAnimationFrame(displayTick);
+                }
                 
                 ws = new WebSocket(data.wsUrl);
                 ws.binaryType = 'arraybuffer';
@@ -621,8 +656,8 @@
                             } catch(err) {}
                         }
 
-                        // Immediate zero-latency rendering to GPU
-                        renderFrame(bytes);
+                        // Enqueue frame for VSYNC-paced presentation
+                        frameQueue.push(bytes);
                     }
                 };
             } else if (data.type === 'input') {

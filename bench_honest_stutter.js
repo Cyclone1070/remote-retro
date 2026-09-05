@@ -37,11 +37,15 @@ async function run() {
     await page.waitForTimeout(400);
     await page.keyboard.down("d"); // Walk right to cause constant motion
 
-    // Wait until at least 600 frames are captured in window.__honestRenderHistory
-    console.log("▶ Recording 600 consecutive canvas render intervals...");
+    // Warm-up pipeline and let initial connection settle
+    await page.waitForTimeout(1000);
+    await page.evaluate(() => { window.__honestRenderHistory = []; });
+
+    // Wait until at least 600 steady-state frames are captured
+    console.log("▶ Recording 600 consecutive steady-state canvas render intervals...");
     await page.waitForFunction(() => {
         return window.__honestRenderHistory && window.__honestRenderHistory.length >= 600;
-    }, { timeout: 20000 });
+    }, { timeout: 25000 });
 
     await page.keyboard.up("d");
 

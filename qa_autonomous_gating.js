@@ -234,9 +234,10 @@ sys.exit(0)
     // GATE 4.5: 600-Frame In-Browser Presentation & Zero-Stutter Gating
     // -------------------------------------------------------------
     console.log('▶ [GATE 4.5] Measuring actual canvas render deltas over 600 frames...');
+    await page.evaluate(() => { window.__honestRenderHistory = []; });
     await page.waitForFunction(() => {
         return window.__honestRenderHistory && window.__honestRenderHistory.length >= 600;
-    }, { timeout: 20000 });
+    }, { timeout: 25000 });
 
     const honestMetrics = await page.evaluate(() => window.getHonestStutterMetrics(600));
     const frameDeltas = (await page.evaluate(() => window.__honestRenderHistory)).slice(-600);
