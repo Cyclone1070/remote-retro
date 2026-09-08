@@ -1,6 +1,5 @@
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
-use std::collections::HashMap;
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use std::time::Instant;
 use tokio_tungstenite::connect_async;
@@ -17,10 +16,13 @@ async fn main() -> Result<()> {
     let (ws_stream, _) = connect_async(ws_url).await?;
     let (mut write, mut read) = ws_stream.split();
 
-    let total_frames: usize = 2000;
+    let total_frames: usize = std::env::var("BENCH_FRAMES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10_800);
     let warmup_frames: usize = 120;
 
-    let input_history: Arc<Mutex<HashMap<u32, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+    let input_history: Arc<Mutex<Vec<Option<Instant>>>> = Arc::new(Mutex::new(vec![None; 256]));
     let running = Arc::new(AtomicBool::new(true));
 
     let history_sender = input_history.clone();
@@ -28,34 +30,57 @@ async fn main() -> Result<()> {
     let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
 
     tokio::spawn(async move {
-        let mut seq = 0u32;
+        let mut step_count = 0usize;
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(8));
         while is_running.load(Ordering::Relaxed) {
             interval.tick().await;
-            seq += 1;
+            step_count += 1;
+            let seq = (step_count & 0xFF) as u8;
             let t_sent = Instant::now();
             {
                 let mut guard = history_sender.lock().unwrap();
-                guard.insert(seq, t_sent);
-                if guard.len() > 200 {
-                    let min_key = guard.keys().min().cloned().unwrap_or(0);
-                    guard.remove(&min_key);
-                }
+                guard[seq as usize] = Some(t_sent);
             }
 
             let mut buttons: u16 = 0;
-            if seq < 120 {
-                if seq % 20 < 10 { buttons |= (1 << 3) | (1 << 0); }
+            if step_count < 120 {
+                if step_count % 20 < 10 { buttons |= (1 << 3) | (1 << 0); } // Start + A to skip title
             } else {
-                let f = seq - 120;
-                if f % 4 < 2 { buttons |= 1 << 4; } else { buttons |= 1 << 5; }
-                if f % 25 < 8 { buttons |= 1 << 0; }
-                if f % 45 < 12 { buttons |= 1 << 1; }
+                let f = (step_count - 120) % 720; // 12-second repeating choreographed human cycle
+                match f {
+                    0..=149 => {
+                        buttons |= 1 << 4; // Right
+                        if (60..=72).contains(&f) { buttons |= 1 << 0; } // Hop A
+                    }
+                    150..=269 => {
+                        buttons |= 1 << 5; // Left
+                        if (210..=230).contains(&f) { buttons |= 1 << 0; } // High Jump A
+                    }
+                    270..=329 => {
+                        buttons |= 1 << 7; // Down (crouch)
+                    }
+                    330..=389 => {
+                        buttons |= 1 << 6; // Up (look up)
+                    }
+                    390..=539 => {
+                        buttons |= 1 << 4; // Right
+                        if (450..=470).contains(&f) { buttons |= 1 << 0; } // Hop A
+                    }
+                    540..=629 => {
+                        buttons |= 1 << 5; // Left
+                    }
+                    _ => {
+                        if (step_count - 120) % 2160 < 90 {
+                            buttons |= 1 << 3; // Start (Pause Menu overlay check)
+                        } else {
+                            buttons |= 1 << 4; // Right
+                        }
+                    }
+                }
             }
 
-            let mut packet = Vec::with_capacity(14);
-            packet.extend_from_slice(&seq.to_le_bytes());
-            packet.extend_from_slice(&0u64.to_le_bytes());
+            let mut packet = Vec::with_capacity(3);
+            packet.push(seq);
             packet.extend_from_slice(&buttons.to_le_bytes());
 
             let _ = input_tx.send(packet).await;
@@ -74,8 +99,6 @@ async fn main() -> Result<()> {
     let mut inter_frame_intervals = Vec::with_capacity(total_frames);
     let mut frame_bytes = Vec::with_capacity(total_frames);
     let mut audio_bytes = Vec::with_capacity(total_frames);
-    let mut host_compute_times = Vec::with_capacity(total_frames);
-    let mut audio_compute_times = Vec::with_capacity(total_frames);
     let mut last_frame_recv = Instant::now();
 
     let mut clean_video_frames = 0;
@@ -83,6 +106,7 @@ async fn main() -> Result<()> {
     let mut corrupt_frames = 0;
     let mut screen_buffer = vec![0u16; TOTAL_PIXELS];
     let mut tile_decoder = gba_streamer::codec::TileCacheDecoder::new();
+    let mut ppu_state = gba_streamer::codec::PpuState::new();
 
     println!("===================================================================");
     println!(" ⚡ AUDITED A/V SYNCHRONIZED LOSSLESS BENCHMARK (2,000 FRAMES) ");
@@ -95,7 +119,7 @@ async fn main() -> Result<()> {
             if msg.is_binary() {
                 let t_recv = Instant::now();
                 let bytes = msg.into_data();
-                if bytes.len() < 35 { continue; }
+                if bytes.len() < 4 { continue; }
 
                 evaluated += 1;
                 if evaluated > warmup_frames {
@@ -104,16 +128,15 @@ async fn main() -> Result<()> {
                 }
                 last_frame_recv = t_recv;
 
-                let matched_seq = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
-                let sim_us = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
-                let audio_enc_us = u32::from_le_bytes(bytes[16..20].try_into().unwrap());
-                let enc_us = u32::from_le_bytes(bytes[20..24].try_into().unwrap());
-                let flag = bytes[32];
-                let audio_len = u16::from_le_bytes(bytes[33..35].try_into().unwrap()) as usize;
+                let header_byte0 = bytes[0];
+                let flag = header_byte0 & 0x3F;
+                let _active_runahead = header_byte0 >> 6;
+                let matched_seq = bytes[1] as usize;
+                let audio_len = u16::from_le_bytes(bytes[2..4].try_into().unwrap()) as usize;
 
-                if bytes.len() < 35 + audio_len { continue; }
-                let audio_payload = &bytes[35..35 + audio_len];
-                let video_payload = &bytes[35 + audio_len..];
+                if bytes.len() < 4 + audio_len { continue; }
+                let audio_payload = &bytes[4..4 + audio_len];
+                let video_payload = &bytes[4 + audio_len..];
 
                 // Audio validation
                 if audio_len > 0 {
@@ -128,7 +151,11 @@ async fn main() -> Result<()> {
 
                 // Video validation
                 let mut valid_video = false;
-                if let Ok(frame) = tile_decoder.decode(flag, video_payload) {
+                if flag == gba_streamer::codec::FLAG_PPU_STATE {
+                    if ppu_state.apply_payload(video_payload).is_ok() {
+                        valid_video = true;
+                    }
+                } else if let Ok(frame) = tile_decoder.decode(flag, video_payload) {
                     screen_buffer.copy_from_slice(frame);
                     valid_video = true;
                 }
@@ -137,7 +164,7 @@ async fn main() -> Result<()> {
 
                 let t_sent_opt = {
                     let mut guard = input_history.lock().unwrap();
-                    guard.remove(&matched_seq)
+                    guard[matched_seq].take()
                 };
 
                 if let Some(t_sent) = t_sent_opt {
@@ -146,9 +173,13 @@ async fn main() -> Result<()> {
                         frame_bytes.push(bytes.len());
                         audio_bytes.push(audio_len);
                         m2p_latencies.push(total_m2p_ms);
-                        host_compute_times.push((sim_us + enc_us + audio_enc_us) as f64 / 1000.0);
-                        audio_compute_times.push(audio_enc_us as f64 / 1000.0);
                     }
+                }
+
+                if evaluated > 0 && evaluated % 1800 == 0 {
+                    let elapsed_sec = evaluated as f64 / 60.0;
+                    let cur_clean = clean_video_frames;
+                    println!("  ⏳ [{}/{} frames | {:.0}s] Streaming healthy (Clean Video: {}/{})", evaluated, total_frames, elapsed_sec, cur_clean, evaluated);
                 }
             }
         }
@@ -197,11 +228,9 @@ async fn main() -> Result<()> {
     let avg_audio_bytes = if !audio_bytes.is_empty() { audio_bytes.iter().sum::<usize>() as f64 / audio_bytes.len() as f64 } else { 0.0 };
     let total_mbps_60 = (avg_total_bytes * 8.0 * 60.0) / 1_000_000.0;
     let audio_kbps_60 = (avg_audio_bytes * 8.0 * 60.0) / 1_000.0;
-    let avg_compute = mean(&host_compute_times);
-    let avg_audio_compute_us = mean(&audio_compute_times) * 1000.0;
 
     println!("\n===================================================================");
-    println!("  AUDITED A/V STREAMING REPORT (2,000 FRAMES EVALUATED) ");
+    println!("  AUDITED A/V STREAMING REPORT ({} FRAMES EVALUATED) ", evaluated);
     println!("===================================================================");
     println!("  Evaluated Frames:                 {}", evaluated);
     println!("  Delivered Framerate:              {:.1} FPS", avg_fps);
@@ -210,13 +239,11 @@ async fn main() -> Result<()> {
     println!("  Inter-Frame Pacing Jitter (σ):    {:.2} ms", jitter_std);
     println!("  Combined A/V Bandwidth:           {:.2} KB/frame ({:.2} Mbps @ 60 FPS)", avg_total_bytes / 1024.0, total_mbps_60);
     println!("  Audio Stream Bitrate (Lossless):  {:.1} bytes/frame ({:.1} kbps @ 60 FPS)", avg_audio_bytes, audio_kbps_60);
-    println!("  Audio Compression Overhead:       {:.2} µs (0.0% CPU impact)", avg_audio_compute_us);
-    println!("  Host Compute (Sim + Audio + Video):{:.3} ms", avg_compute);
-    println!("  Mean Wire M2P Latency:            {:.2} ms", avg_m2p);
-    println!("  P50 (Median) Wire M2P:            {:.2} ms", p50_m2p);
-    println!("  P95 Wire M2P (Tail):              {:.2} ms", p95_m2p);
-    println!("  P99 Wire M2P:                     {:.2} ms", p99_m2p);
-    println!("  Client-Presented M2P (P50 + 8ms): {:.2} ms", p50_m2p + 8.0);
+    println!("  Frame Header Size (Lean):         4 bytes (Codec + Seq + AudioLen)");
+    println!("  Mean Socket-to-Socket Wire M2P:   {:.2} ms", avg_m2p);
+    println!("  P50 (Median) Socket Wire M2P:     {:.2} ms", p50_m2p);
+    println!("  P95 Socket Wire M2P (Tail):       {:.2} ms", p95_m2p);
+    println!("  P99 Socket Wire M2P:              {:.2} ms", p99_m2p);
     println!("  Video Pixel Integrity:            {:.2}% ({} clean / {} total)", video_integrity_rate, clean_video_frames, total_eval);
     println!("  Audio Stream Integrity:           {:.2}% ({} clean / {} total)", audio_integrity_rate, clean_audio_frames, total_eval);
     println!("===================================================================\n");

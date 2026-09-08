@@ -26,7 +26,7 @@ struct RetroGameInfo {
     meta: *const c_char,
 }
 
-static LAST_FRAME_16: Mutex<Vec<u16>> = Mutex::new(Vec::new());
+pub(crate) static LAST_FRAME_16: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 static AUDIO_BUFFER: Mutex<Vec<i16>> = Mutex::new(Vec::new());
 static INPUT_STATE: AtomicI16 = AtomicI16::new(0);
 
@@ -233,58 +233,15 @@ impl RetroCore {
             } else {
                 0
             };
-            let mut state_buffer = vec![0u8; state_size];
+            let state_buffer = vec![0u8; state_size];
 
-            // Auto-calibrate runahead if not already cached
+            // Default runahead: use user cached setting if present, otherwise default to 0F (safe)
             let final_runahead = if let Some(cached) = crate::runahead_db::lookup_cached(&rom_info.game_code) {
                 cached
             } else if let Some(verified) = crate::runahead_db::lookup_verified_db(&rom_info.game_code) {
                 verified
-            } else if let (Some(ref ser), Some(ref unser)) = (&retro_serialize, &retro_unserialize) {
-                // Perform inline 6-frame headless probe (<1ms)
-                // 1. Advance 60 frames past boot
-                for _ in 0..60 {
-                    retro_run();
-                }
-                
-                // 2. Checkpoint state
-                let sz = state_buffer.len();
-                ser(state_buffer.as_mut_ptr() as *mut c_void, sz);
-
-                // 3. Baseline idle frame
-                INPUT_STATE.store(0, Ordering::Relaxed);
-                retro_run();
-                let baseline = LAST_FRAME_16.lock().unwrap().clone();
-
-                // 4. Restore and probe with input
-                unser(state_buffer.as_ptr() as *const c_void, sz);
-                INPUT_STATE.store((1 << 4) | (1 << 0), Ordering::Relaxed); // Right + A
-
-                let mut measured_lag = 0u8;
-                for frame_idx in 0..6 {
-                    retro_run();
-                    let current = LAST_FRAME_16.lock().unwrap().clone();
-                    let diff_count = baseline
-                        .iter()
-                        .zip(current.iter())
-                        .filter(|(a, b)| a != b)
-                        .count();
-                    if diff_count > 50 {
-                        measured_lag = frame_idx as u8;
-                        break;
-                    }
-                }
-
-                // 5. Restore back to clean state
-                unser(state_buffer.as_ptr() as *const c_void, sz);
-                INPUT_STATE.store(0, Ordering::Relaxed);
-                AUDIO_BUFFER.lock().unwrap().clear();
-
-                println!("🎯 Auto-probed ROM '{}' -> Measured Lag: {}F (saved to ~/.config)", rom_info.title, measured_lag);
-                crate::runahead_db::cache_measured_runahead(rom_info.game_code.clone(), measured_lag);
-                measured_lag
             } else {
-                1
+                rom_info.recommended_runahead // defaults to 0
             };
 
             println!(
@@ -311,6 +268,91 @@ impl RetroCore {
 
     pub fn set_runahead_frames(&mut self, frames: u8) {
         self.runahead_frames = frames.min(2);
+    }
+
+    pub fn state_size(&self) -> usize {
+        self.state_buffer.len()
+    }
+
+    pub fn save_state(&self, buf: &mut [u8]) -> bool {
+        if let Some(ref ser) = self.retro_serialize {
+            unsafe { ser(buf.as_mut_ptr() as *mut c_void, buf.len()) }
+        } else {
+            false
+        }
+    }
+
+    pub fn load_state(&mut self, buf: &[u8]) -> bool {
+        if let Some(ref unser) = self.retro_unserialize {
+            unsafe { unser(buf.as_ptr() as *const c_void, buf.len()) }
+        } else {
+            false
+        }
+    }
+
+    /// Measures the exact internal engine lag of the active scene using twin-branch differential
+    pub fn probe_current_lag(&mut self, test_mask: i16) -> u8 {
+        if let (Some(ref ser), Some(ref unser)) = (&self.retro_serialize, &self.retro_unserialize) {
+            if self.state_buffer.is_empty() {
+                return 0;
+            }
+            let sz = self.state_buffer.len();
+
+            // 1. Checkpoint current live state
+            unsafe {
+                ser(self.state_buffer.as_mut_ptr() as *mut c_void, sz);
+            }
+
+            // 2. Branch A: Idle frames (3 steps)
+            INPUT_STATE.store(0, Ordering::Relaxed);
+            let mut idle_frames = Vec::with_capacity(3);
+            for _ in 0..3 {
+                unsafe { (self.retro_run)(); }
+                idle_frames.push(LAST_FRAME_16.lock().unwrap().clone());
+            }
+
+            // 3. Branch B: Input frames (3 steps)
+            unsafe {
+                unser(self.state_buffer.as_ptr() as *const c_void, sz);
+            }
+            let effective_mask = if test_mask != 0 { test_mask } else { (1 << 4) | (1 << 0) };
+            INPUT_STATE.store(effective_mask, Ordering::Relaxed);
+            let mut input_frames = Vec::with_capacity(3);
+            for _ in 0..3 {
+                unsafe { (self.retro_run)(); }
+                input_frames.push(LAST_FRAME_16.lock().unwrap().clone());
+            }
+
+            // 4. Measure lag by comparing Frame(T+k, Input) vs Frame(T+k, Idle)
+            let mut measured_lag = 0u8;
+            for (step, (in_frame, idle_frame)) in input_frames.iter().zip(idle_frames.iter()).enumerate() {
+                let diff_count = in_frame
+                    .iter()
+                    .zip(idle_frame.iter())
+                    .filter(|(a, b)| a != b)
+                    .count();
+                println!("DEBUG: Probe step {}: diff_count = {}", step, diff_count);
+                if diff_count > 50 {
+                    measured_lag = step as u8;
+                    break;
+                }
+            }
+
+            // 5. Restore live state back cleanly
+            unsafe {
+                unser(self.state_buffer.as_ptr() as *const c_void, sz);
+            }
+            INPUT_STATE.store(0, Ordering::Relaxed);
+            AUDIO_BUFFER.lock().unwrap().clear();
+
+            println!(
+                "🎯 Live calibrated ROM '{}' [{}] -> Measured Engine Lag: {}F",
+                self.rom_title, self.rom_game_code, measured_lag
+            );
+            measured_lag
+        } else {
+            0
+        }
     }
 
     pub fn step(&mut self) -> (u32, Vec<u16>, Vec<i16>) {
@@ -376,6 +418,83 @@ impl RetroCore {
         }
     }
 
+    pub fn step_ppu(
+        &mut self,
+        vram_out: &mut [u8],
+        pal_out: &mut [u8],
+        oam_out: &mut [u8],
+        io_out: &mut [u8],
+    ) -> (u32, Vec<i16>, bool) {
+        let t0 = Instant::now();
+        let has_ppu = Self::has_ppu_memory();
+
+        if self.runahead_frames > 0 && self.retro_serialize.is_some() && self.retro_unserialize.is_some() && !self.state_buffer.is_empty() {
+            // 1. Advance canonical frame with user input
+            unsafe { (self.retro_run)(); }
+
+            // 2. Capture canonical audio
+            let canonical_audio = {
+                let mut audio = AUDIO_BUFFER.lock().unwrap();
+                let samples = audio.clone();
+                audio.clear();
+                samples
+            };
+
+            // 3. Checkpoint canonical state
+            let sz = self.state_buffer.len();
+            unsafe {
+                if let Some(ref ser) = self.retro_serialize {
+                    ser(self.state_buffer.as_mut_ptr() as *mut c_void, sz);
+                }
+            }
+
+            // 4. Fast-forward N frames ahead into the future
+            for _ in 0..self.runahead_frames {
+                unsafe { (self.retro_run)(); }
+            }
+
+            // 5. Capture future PPU state (instant button reaction)
+            let ppu_ok = if has_ppu {
+                Self::read_ppu_state(vram_out, pal_out, oam_out, io_out)
+            } else {
+                false
+            };
+
+            // Discard speculative fast-forward audio
+            {
+                let mut audio = AUDIO_BUFFER.lock().unwrap();
+                audio.clear();
+            }
+
+            // 6. Rollback state to canonical frame
+            unsafe {
+                if let Some(ref unser) = self.retro_unserialize {
+                    unser(self.state_buffer.as_ptr() as *const c_void, sz);
+                }
+            }
+
+            let sim_us = t0.elapsed().as_micros() as u32;
+            (sim_us, canonical_audio, ppu_ok)
+        } else {
+            // Standard Emulation (0 Run-Ahead Frames)
+            unsafe {
+                (self.retro_run)();
+            }
+            let sim_us = t0.elapsed().as_micros() as u32;
+            let mut audio = AUDIO_BUFFER.lock().unwrap();
+            let audio_samples = audio.clone();
+            audio.clear();
+
+            let ppu_ok = if has_ppu {
+                Self::read_ppu_state(vram_out, pal_out, oam_out, io_out)
+            } else {
+                false
+            };
+
+            (sim_us, audio_samples, ppu_ok)
+        }
+    }
+
     pub fn has_ppu_memory() -> bool {
         !VRAM_PTR.load(Ordering::Relaxed).is_null()
             && !PAL_PTR.load(Ordering::Relaxed).is_null()
@@ -431,9 +550,9 @@ mod tests {
         let dummy_vram = vec![0x11u8; 98304];
         let dummy_pal = vec![0x22u8; 1024];
         let dummy_oam = vec![0x33u8; 1024];
-        let dummy_io = vec![0x44u8; 128];
+        let dummy_io = [0x44u8; 128];
 
-        let descs = vec![
+        let descs = [
             RetroMemoryDescriptor {
                 flags: 0,
                 ptr: dummy_vram.as_ptr() as *mut c_void,

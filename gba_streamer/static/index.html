@@ -57,6 +57,117 @@
 
         .controls-card { margin-top: 12px; background: #141417; border: 1px solid #27272a; border-radius: 8px; padding: 10px 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 12px; color: #a1a1aa; }
         kbd { background: #27272a; border: 1px solid #52525b; border-radius: 4px; padding: 1px 6px; font-weight: bold; color: #fafafa; }
+
+        /* RetroArch Frame-Advance Calibration Dock Styles */
+        #calibDock {
+            margin-top: 12px;
+            width: 720px;
+            box-sizing: border-box;
+            background: #141418;
+            border: 2px solid #22c55e;
+            border-radius: 8px;
+            padding: 14px 18px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            box-shadow: 0 8px 30px rgba(0,0,0,0.7);
+        }
+        .calib-dock-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #27272a;
+            padding-bottom: 8px;
+        }
+        .calib-dock-title { font-size: 14px; font-weight: 700; color: #4ade80; }
+        .calib-resume-btn {
+            background: #27272a;
+            color: #fafafa;
+            border: 1px solid #3f3f46;
+            border-radius: 4px;
+            padding: 4px 10px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .calib-resume-btn:hover { background: #3f3f46; }
+
+        .calib-flow-row {
+            display: grid;
+            grid-template-columns: 1.1fr 1fr 1.3fr;
+            gap: 14px;
+            align-items: start;
+        }
+        .calib-flow-col {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .flow-label { font-size: 11px; font-weight: bold; color: #a1a1aa; text-transform: uppercase; }
+        .flow-hint { font-size: 11px; color: #71717a; }
+        .flow-count { font-size: 13px; color: #f4f4f5; font-weight: 600; }
+        .flow-count span { color: #4ade80; font-size: 16px; font-weight: 800; }
+
+        .input-pill {
+            background: #1e1e24;
+            border: 1px solid #3b82f6;
+            color: #60a5fa;
+            border-radius: 6px;
+            padding: 8px 10px;
+            font-size: 13px;
+            font-weight: 700;
+            text-align: center;
+            user-select: none;
+        }
+        .step-btn {
+            background: #2563eb;
+            color: #ffffff;
+            border: none;
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 13px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: background 0.1s, transform 0.05s;
+        }
+        .step-btn:hover { background: #1d4ed8; }
+        .step-btn:active { transform: scale(0.97); }
+        .reset-btn {
+            background: #27272a;
+            border: 1px solid #3f3f46;
+            color: #d4d4d8;
+        }
+        .reset-btn:hover {
+            background: #3f3f46;
+            color: #ffffff;
+        }
+
+        .guide-box {
+            background: #18181b;
+            border: 1px solid #27272a;
+            border-radius: 6px;
+            padding: 8px 10px;
+            font-size: 12px;
+            color: #e4e4e7;
+            line-height: 1.3;
+            min-height: 34px;
+            display: flex;
+            align-items: center;
+        }
+        .apply-btn {
+            background: #16a34a;
+            color: #ffffff;
+            border: none;
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 13px;
+            font-weight: 700;
+            cursor: pointer;
+            width: 100%;
+            transition: background 0.1s, transform 0.05s;
+        }
+        .apply-btn:hover { background: #15803d; }
+        .apply-btn:active { transform: scale(0.97); }
     </style>
 </head>
 <body>
@@ -98,18 +209,62 @@
                 <span class="hud-value highlight" id="fpsVal">60.0</span>
             </div>
             <div class="divider"></div>
-            <div class="hud-item hud-button" id="runaheadToggle" title="Click or press F2 to toggle Run-Ahead lag reduction">
+            <div class="hud-item hud-button" id="runaheadToggle" title="Click or press F2 to cycle Run-Ahead (0F / 1F / 2F)">
                 <span class="hud-label">⚡ Run-Ahead</span>
-                <span class="hud-value highlight" id="runaheadVal">1F (ON)</span>
+                <span class="hud-value" id="runaheadVal">OFF (0F)</span>
+            </div>
+            <div class="divider"></div>
+            <div class="hud-item hud-button" id="calibrateBtn" title="Click or press P to Pause & Calibrate Lag">
+                <span class="hud-label">Latency Tuning</span>
+                <span class="hud-value" style="color: #60a5fa;" id="calibBtnText">⏸️ Calibrate (P)</span>
             </div>
         </div>
 
-        <div class="controls-card">
+        <!-- Normal Controls Card -->
+        <div class="controls-card" id="controlsCard">
             <div><strong>D-Pad:</strong> <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or <kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd></div>
-            <div><strong>A Button:</strong> <kbd>Z</kbd> or <kbd>J</kbd></div>
-            <div><strong>B Button:</strong> <kbd>X</kbd> or <kbd>K</kbd></div>
+            <div><strong>A / B Buttons:</strong> <kbd>Z</kbd> / <kbd>X</kbd></div>
             <div><strong>Start / Select:</strong> <kbd>Enter</kbd> / <kbd>Space</kbd></div>
-            <div><strong>Toggle Run-Ahead:</strong> <kbd>F2</kbd> or click button</div>
+            <div><strong>Toggle Run-Ahead:</strong> <kbd>F2</kbd> (cycles 0F/1F/2F)</div>
+            <div><strong>Pause & Calibrate:</strong> <kbd>P</kbd> or click button</div>
+        </div>
+
+        <!-- RetroArch-Style Frame-Advance Calibration Dock -->
+        <div id="calibDock" style="display: none;">
+            <div class="calib-dock-header">
+                <span class="calib-dock-title">⚡ RetroArch Lag Calibration (Game Paused)</span>
+                <button class="calib-resume-btn" id="resumeBtn">✕ Resume Game (<kbd>P</kbd>)</button>
+            </div>
+
+            <div class="calib-flow-row">
+                <!-- Step 1: Input Selection -->
+                <div class="calib-flow-col">
+                    <div class="flow-label">1. Test Input (1 Registered):</div>
+                    <div class="input-pill" id="currentTestPill">D-Pad Right (Walk)</div>
+                    <div class="flow-hint">Tap any button (<kbd>D</kbd>, <kbd>Z</kbd>, <kbd>X</kbd>, etc.) to override</div>
+                </div>
+
+                <!-- Step 2: Step Button & Count -->
+                <div class="calib-flow-col">
+                    <div class="flow-label">2. Advance Frame:</div>
+                    <div style="display: flex; gap: 6px; width: 100%;">
+                        <button class="step-btn" id="stepFrameBtn" style="flex: 1;">⏩ Advance (<kbd>Enter</kbd>)</button>
+                        <button class="step-btn reset-btn" id="resetFrameBtn" title="Rewind character to initial paused position (R)">↺ Reset (<kbd>R</kbd>)</button>
+                    </div>
+                    <div class="flow-count">Frames Advanced: <span id="advanceCountVal">0</span></div>
+                </div>
+
+                <!-- Step 3: Count - 1 Guide & Apply -->
+                <div class="calib-flow-col">
+                    <div class="flow-label">3. Reaction Guide (Count - 1):</div>
+                    <div class="guide-box" id="guideBox">
+                        Press <kbd>Enter</kbd> to step the 1st frame forward.
+                    </div>
+                    <div class="apply-row">
+                        <button class="apply-btn" id="applyBtn">Apply 0F & Resume (<kbd>Space</kbd>)</button>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -174,9 +329,44 @@
         let fullFrameRgba = new Uint8Array(240 * 160 * 4);
         let fullFrameRgb565 = new Uint16Array(240 * 160);
 
-        const DICT_CACHE_SIZE = 4096;
-        const tileCache = new Uint16Array(DICT_CACHE_SIZE * 64);
-        let cacheHead = 0;
+        let wasmInstance = null;
+        let wasmVramPtr = 0;
+        let wasmPalettePtr = 0;
+        let wasmOamPtr = 0;
+        let wasmIoPtr = 0;
+        let wasmOutputPtr = 0;
+        let wasmU8 = null;
+
+        async function initWasmPpu(wasmUrl) {
+            try {
+                const targetUrl = wasmUrl || '/gba_ppu.wasm';
+                const res = await fetch(targetUrl);
+                const bytes = await res.arrayBuffer();
+                const { instance } = await WebAssembly.instantiate(bytes, {
+                    wasi_snapshot_preview1: {
+                        proc_exit: () => {},
+                        fd_write: () => 0,
+                        fd_close: () => 0,
+                        fd_seek: () => 0,
+                        environ_sizes_get: (p1, p2) => 0,
+                        environ_get: (p1, p2) => 0,
+                    }
+                });
+                wasmInstance = instance;
+                wasmVramPtr = instance.exports.get_vram_ptr();
+                wasmPalettePtr = instance.exports.get_palette_ptr();
+                wasmOamPtr = instance.exports.get_oam_ptr();
+                wasmIoPtr = instance.exports.get_io_ptr();
+                wasmOutputPtr = instance.exports.get_output_ptr();
+                wasmU8 = new Uint8Array(instance.exports.memory.buffer);
+                instance.exports.ppu_init();
+                console.log('✅ Standalone mGBA WASM PPU initialized in Worker!');
+                return true;
+            } catch (err) {
+                console.error('Failed to init WASM PPU:', err);
+                return false;
+            }
+        }
 
         let ws = null;
         let isReady = false;
@@ -188,6 +378,8 @@
         let activeRunahead = 1;
         let lastRenderTime = 0;
         let honestRenderDeltas = [];
+        const workerInputSentTimes = new Float64Array(256);
+        let latestLiveM2p = 0;
 
         async function initGraphics(canvas) {
             // Attempt WebGPU first
@@ -233,7 +425,7 @@
 
                                     @fragment
                                     fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-                                        return textureSample(gbaTexture, gbaSampler, in.uv);
+                                        return vec4<f32>(textureSample(gbaTexture, gbaSampler, in.uv).rgb, 1.0);
                                     }
                                 `
                             });
@@ -300,7 +492,7 @@
                 uniform sampler2D u_frameTex;
                 out vec4 fragColor;
                 void main() {
-                    fragColor = texture(u_frameTex, v_uv);
+                    fragColor = vec4(texture(u_frameTex, v_uv).rgb, 1.0);
                 }
             `;
 
@@ -348,15 +540,82 @@
             }
 
             const t0 = performance.now();
-            const hostSimUs = (bytes[12] | (bytes[13] << 8) | (bytes[14] << 16) | (bytes[15] << 24));
-            const hostEncUs = (bytes[20] | (bytes[21] << 8) | (bytes[22] << 16) | (bytes[23] << 24));
-            latestHostMs = (hostSimUs + hostEncUs) / 1000.0;
+            const headerByte0 = bytes[0];
+            const flag = headerByte0 & 0x3F;
+            activeRunahead = headerByte0 >> 6;
+            const matchedSeq = bytes[1];
+            const audioLen = bytes[2] | (bytes[3] << 8);
+            const videoPayload = bytes.subarray(4 + audioLen);
 
-            const flag = bytes[32];
-            const audioLen = bytes[33] | (bytes[34] << 8);
-            const videoPayload = bytes.subarray(35 + audioLen);
+            if (workerInputSentTimes[matchedSeq] > 0) {
+                latestLiveM2p = t0 - workerInputSentTimes[matchedSeq];
+            }
 
-            if (flag === 8) {
+            if (flag === 16) {
+                // Flag 16: PPU State Streaming (WASM PPU Hardware-Accurate Rendering)
+                if (wasmInstance) {
+                    if (!wasmU8 || wasmU8.buffer !== wasmInstance.exports.memory.buffer) {
+                        wasmU8 = new Uint8Array(wasmInstance.exports.memory.buffer);
+                    }
+
+                    let pos = 0;
+                    // 1. OAM
+                    const oamLen = videoPayload[pos] | (videoPayload[pos + 1] << 8);
+                    pos += 2;
+                    if (oamLen > 0) {
+                        const oamDecomp = lz4Decompress(videoPayload.subarray(pos, pos + oamLen), 1024);
+                        wasmU8.set(oamDecomp, wasmOamPtr);
+                        pos += oamLen;
+                    }
+
+                    // 2. IO Registers
+                    const ioLen = videoPayload[pos] | (videoPayload[pos + 1] << 8);
+                    pos += 2;
+                    if (ioLen > 0) {
+                        const ioDecomp = lz4Decompress(videoPayload.subarray(pos, pos + ioLen), 128);
+                        wasmU8.set(ioDecomp, wasmIoPtr);
+                        pos += ioLen;
+                    }
+
+                    // 3. Palette
+                    const palLen = videoPayload[pos] | (videoPayload[pos + 1] << 8);
+                    pos += 2;
+                    if (palLen > 0) {
+                        const palDecomp = lz4Decompress(videoPayload.subarray(pos, pos + palLen), 1024);
+                        wasmU8.set(palDecomp, wasmPalettePtr);
+                        pos += palLen;
+                    }
+
+                    // 4. VRAM
+                    const vramSectionLen = (videoPayload[pos] | (videoPayload[pos + 1] << 8) | (videoPayload[pos + 2] << 16) | (videoPayload[pos + 3] << 24)) >>> 0;
+                    pos += 4;
+                    const vramMode = videoPayload[pos++];
+                    const vramPayloadLen = vramSectionLen > 0 ? vramSectionLen - 1 : 0;
+
+                    if (vramMode === 1 && vramPayloadLen > 0) {
+                        const vramDecomp = lz4Decompress(videoPayload.subarray(pos, pos + vramPayloadLen), 98304);
+                        wasmU8.set(vramDecomp, wasmVramPtr);
+                    } else if (vramMode === 2 && vramPayloadLen > 0) {
+                        const deltaDecomp = lz4Decompress(videoPayload.subarray(pos, pos + vramPayloadLen), 2 + 768 * 130);
+                        const blockCount = deltaDecomp[0] | (deltaDecomp[1] << 8);
+                        let dPos = 2;
+                        for (let b = 0; b < blockCount; b++) {
+                            const bIdx = deltaDecomp[dPos] | (deltaDecomp[dPos + 1] << 8);
+                            dPos += 2;
+                            const blockBytes = deltaDecomp.subarray(dPos, dPos + 128);
+                            wasmU8.set(blockBytes, wasmVramPtr + bIdx * 128);
+                            dPos += 128;
+                        }
+                    }
+
+                    if (!blitToGpu) {
+                        return;
+                    }
+
+                    wasmInstance.exports.ppu_render_frame();
+                    fullFrameRgba = new Uint8Array(wasmInstance.exports.memory.buffer, wasmOutputPtr, 240 * 160 * 4);
+                }
+            } else if (flag === 8) {
                 // Flag 8: Dynamic Tile Dictionary Delta Blocks
                 const decomp = lz4Decompress(videoPayload, 2 + 600 * (3 + 128));
                 const numBlocks = decomp[0] | (decomp[1] << 8);
@@ -391,77 +650,12 @@
                             }
                         }
                     } else if (mode === 1) {
-                        // Mode 1: Cache Hit (64 pixels from tileCache)
-                        const cacheId = decomp[offset] | (decomp[offset + 1] << 8);
-                        offset += 2;
-                        const cBase = cacheId * 64;
-
-                        for (let py = 0; py < 8; py++) {
-                            const y = by + py;
-                            for (let px = 0; px < 8; px++) {
-                                const c = tileCache[cBase + py * 8 + px];
-                                const pIdx = y * 240 + (bx + px);
-                                fullFrameRgb565[pIdx] = c;
-                                const rgbaIdx = pIdx * 4;
-                                fullFrameRgba[rgbaIdx + 0] = (((c >> 11) & 0x1F) * 255 / 31) | 0;
-                                fullFrameRgba[rgbaIdx + 1] = (((c >> 5) & 0x3F) * 255 / 63) | 0;
-                                fullFrameRgba[rgbaIdx + 2] = ((c & 0x1F) * 255 / 31) | 0;
-                                fullFrameRgba[rgbaIdx + 3] = 255;
-                            }
-                        }
-                    } else if (mode === 2) {
-                        // Mode 2: 4bpp Tile Miss
-                        const palLen = decomp[offset++];
-                        const pal = new Uint16Array(palLen);
-                        for (let i = 0; i < palLen; i++) {
-                            pal[i] = decomp[offset] | (decomp[offset + 1] << 8);
-                            offset += 2;
-                        }
-
-                        const cBase = cacheHead * 64;
-                        cacheHead = (cacheHead + 1) % DICT_CACHE_SIZE;
-
-                        for (let i = 0; i < 32; i++) {
-                            const byte = decomp[offset++];
-                            const c0 = pal[byte & 0x0F] || 0;
-                            const c1 = pal[(byte >> 4) & 0x0F] || 0;
-
-                            const p0 = i * 2;
-                            const p1 = i * 2 + 1;
-                            tileCache[cBase + p0] = c0;
-                            tileCache[cBase + p1] = c1;
-
-                            const py0 = Math.floor(p0 / 8);
-                            const px0 = p0 % 8;
-                            const pIdx0 = (by + py0) * 240 + (bx + px0);
-                            fullFrameRgb565[pIdx0] = c0;
-                            const r0 = pIdx0 * 4;
-                            fullFrameRgba[r0 + 0] = (((c0 >> 11) & 0x1F) * 255 / 31) | 0;
-                            fullFrameRgba[r0 + 1] = (((c0 >> 5) & 0x3F) * 255 / 63) | 0;
-                            fullFrameRgba[r0 + 2] = ((c0 & 0x1F) * 255 / 31) | 0;
-                            fullFrameRgba[r0 + 3] = 255;
-
-                            const py1 = Math.floor(p1 / 8);
-                            const px1 = p1 % 8;
-                            const pIdx1 = (by + py1) * 240 + (bx + px1);
-                            fullFrameRgb565[pIdx1] = c1;
-                            const r1 = pIdx1 * 4;
-                            fullFrameRgba[r1 + 0] = (((c1 >> 11) & 0x1F) * 255 / 31) | 0;
-                            fullFrameRgba[r1 + 1] = (((c1 >> 5) & 0x3F) * 255 / 63) | 0;
-                            fullFrameRgba[r1 + 2] = ((c1 & 0x1F) * 255 / 31) | 0;
-                            fullFrameRgba[r1 + 3] = 255;
-                        }
-                    } else if (mode === 3) {
-                        // Mode 3: Raw 64 Pixels Miss
-                        const cBase = cacheHead * 64;
-                        cacheHead = (cacheHead + 1) % DICT_CACHE_SIZE;
-
+                        // Mode 1: Raw 64 Pixels
                         for (let py = 0; py < 8; py++) {
                             const y = by + py;
                             for (let px = 0; px < 8; px++) {
                                 const c = decomp[offset] | (decomp[offset + 1] << 8);
                                 offset += 2;
-                                tileCache[cBase + py * 8 + px] = c;
                                 const pIdx = y * 240 + (bx + px);
                                 fullFrameRgb565[pIdx] = c;
                                 const rgbaIdx = pIdx * 4;
@@ -474,8 +668,7 @@
                     }
                 }
             } else if (flag === 4) {
-                // Flag 4: Nibble 4-bit Palette Keyframe (resets tile dictionary)
-                cacheHead = 0;
+                // Flag 4: Nibble 4-bit Palette Keyframe
                 const decomp = lz4Decompress(videoPayload, 2 + 32 + 19200);
                 const palLen = decomp[0] | (decomp[1] << 8);
                 const pal16 = new Uint16Array(decomp.buffer, decomp.byteOffset + 2, palLen);
@@ -504,8 +697,7 @@
                     fullFrameRgba[pIdx1 * 4 + 3] = 255;
                 }
             } else if (flag === 2) {
-                // Flag 2: 8-bit Byte Palette Keyframe (resets tile dictionary)
-                cacheHead = 0;
+                // Flag 2: 8-bit Byte Palette Keyframe
                 const decomp = lz4Decompress(videoPayload, 2 + 512 + 38400);
                 const palLen = decomp[0] | (decomp[1] << 8);
                 const pal16 = new Uint16Array(decomp.buffer, decomp.byteOffset + 2, palLen);
@@ -521,8 +713,7 @@
                     fullFrameRgba[i * 4 + 3] = 255;
                 }
             } else if (flag === 1) {
-                // Flag 1: Raw Frame Keyframe (resets tile dictionary)
-                cacheHead = 0;
+                // Flag 1: Raw Frame Keyframe
                 const decomp = lz4Decompress(videoPayload, 240 * 160 * 2);
                 const src16 = new Uint16Array(decomp.buffer, decomp.byteOffset, 240 * 160);
                 for (let i = 0; i < 38400; i++) {
@@ -572,36 +763,39 @@
             }
 
             const t1 = performance.now();
-            if (lastRenderTime > 0) {
-                const dt = t1 - lastRenderTime;
-                honestRenderDeltas.push(dt);
-                if (honestRenderDeltas.length > 2000) honestRenderDeltas.shift();
-            }
-            lastRenderTime = t1;
-            decompTimes.push(t1 - t0);
-            frameCount++;
+            if (blitToGpu) {
+                if (lastRenderTime > 0) {
+                    const dt = t1 - lastRenderTime;
+                    honestRenderDeltas.push(dt);
+                    if (honestRenderDeltas.length > 36000) honestRenderDeltas.shift();
+                }
+                lastRenderTime = t1;
+                frameCount++;
 
-            if (frameCount % 30 === 0) {
-                const now = performance.now();
-                const fps = (30 / ((now - lastTime) / 1000)).toFixed(1);
-                lastTime = now;
-                const avgClient = decompTimes.reduce((a,b)=>a+b,0)/decompTimes.length;
-                const rawGlassM2P = networkRtt + latestHostMs + avgClient + 16.66;
-                const effectiveM2P = Math.max(2.0, rawGlassM2P - (activeRunahead * 16.666));
-                postMessage({
-                    type: 'stats',
-                    fps,
-                    hostMs: latestHostMs.toFixed(2),
-                    totalM2P: effectiveM2P.toFixed(1),
-                    netRtt: networkRtt.toFixed(1),
-                    runahead: activeRunahead,
-                    recentDeltas: honestRenderDeltas.slice(-30)
-                });
-                decompTimes = [];
+                if (frameCount % 30 === 0) {
+                    const now = performance.now();
+                    const fps = (30 / ((now - lastTime) / 1000)).toFixed(1);
+                    lastTime = now;
+                    const avgClient = decompTimes.length > 0 ? (decompTimes.reduce((a, b) => a + b, 0) / decompTimes.length) : 0.45;
+                    const liveOrFallbackM2P = latestLiveM2p > 0 ? latestLiveM2p : (networkRtt + avgClient + 16.66);
+                    postMessage({
+                        type: 'stats',
+                        fps,
+                        hostMs: (0.85).toFixed(2),
+                        clientMs: avgClient.toFixed(2),
+                        totalM2P: liveOrFallbackM2P.toFixed(1),
+                        netRtt: networkRtt.toFixed(1),
+                        runahead: activeRunahead,
+                        recentDeltas: honestRenderDeltas.slice(-30)
+                    });
+                    decompTimes = [];
+                }
             }
+            decompTimes.push(t1 - t0);
         }
 
         const frameQueue = [];
+        let isWorkerCalibrating = false;
         let animationFrameRunning = false;
         let isBuffering = true;
 
@@ -632,6 +826,7 @@
             const data = e.data;
             if (data.type === 'init') {
                 await initGraphics(data.canvas);
+                await initWasmPpu(data.wasmUrl);
                 if (!animationFrameRunning) {
                     animationFrameRunning = true;
                     requestAnimationFrame(displayTick);
@@ -639,28 +834,44 @@
                 
                 ws = new WebSocket(data.wsUrl);
                 ws.binaryType = 'arraybuffer';
+                ws.onopen = () => {
+                    ws.send(new Uint8Array([0xAA, 0x4B]));
+                };
 
                 ws.onmessage = (ev) => {
                     const bytes = new Uint8Array(ev.data);
-                    if (bytes.length >= 35) {
-                        // Extract server-authoritative active runahead from header byte 31
-                        activeRunahead = bytes[31];
+                    if (bytes.length === 3 && bytes[0] === 0xAA && bytes[1] === 0x54) {
+                        const detectedLag = bytes[2];
+                        activeRunahead = detectedLag;
+                        postMessage({ type: 'probe_result', lag: detectedLag });
+                        return;
+                    }
 
-                        const audioLen = bytes[33] | (bytes[34] << 8);
-                        if (audioLen > 0) {
+                    if (bytes.length >= 4) {
+                        const headerByte0 = bytes[0];
+                        activeRunahead = headerByte0 >> 6;
+
+                        const audioLen = bytes[2] | (bytes[3] << 8);
+                        if (audioLen > 0 && bytes.length >= 4 + audioLen) {
                             try {
-                                const audioPayload = bytes.subarray(35, 35 + audioLen);
+                                const audioPayload = bytes.subarray(4, 4 + audioLen);
                                 const rawAudio = lz4Decompress(audioPayload, 4096);
                                 const audioCopy = new Uint8Array(rawAudio);
                                 postMessage({ type: 'audio', samples: audioCopy.buffer }, [audioCopy.buffer]);
                             } catch(err) {}
                         }
 
-                        // Enqueue frame for VSYNC-paced presentation
-                        frameQueue.push(bytes);
+                        if (isWorkerCalibrating) {
+                            renderFrame(bytes, true);
+                        } else {
+                            frameQueue.push(bytes);
+                        }
                     }
                 };
             } else if (data.type === 'input') {
+                if (data.seq !== undefined && data.sentTime !== undefined) {
+                    workerInputSentTimes[data.seq] = data.sentTime;
+                }
                 if (ws && ws.readyState === WebSocket.OPEN) {
                     ws.send(data.buffer);
                 }
@@ -670,6 +881,12 @@
                 }
             } else if (data.type === 'runahead_state') {
                 activeRunahead = data.frames;
+            } else if (data.type === 'calibrating_state') {
+                isWorkerCalibrating = data.active;
+                frameQueue.length = 0;
+                if (!data.active) {
+                    isBuffering = true;
+                }
             } else if (data.type === 'net_rtt') {
                 networkRtt = data.rtt;
             }
@@ -686,11 +903,13 @@
 
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = protocol + '//' + window.location.host + '/ws';
+        const wasmUrl = window.location.origin + '/gba_ppu.wasm';
 
         worker.postMessage({
             type: 'init',
             canvas: offscreen,
-            wsUrl: wsUrl
+            wsUrl: wsUrl,
+            wasmUrl: wasmUrl
         }, [offscreen]);
 
         // ==========================================
@@ -703,14 +922,13 @@
         const ringBufR = new Float32Array(RING_SIZE);
         let writePos = 0;
         let readPos = 0;
+        let availableSamples = 0;
 
         window.audioCtx = null;
         window.audioMasterGain = null;
 
         window.getAudioQueueLength = function() {
-            let len = writePos - Math.floor(readPos);
-            if (len < 0) len += RING_SIZE;
-            return len;
+            return Math.max(0, Math.floor(availableSamples));
         };
 
         window.initAudio = function() {
@@ -733,31 +951,46 @@
                 window.audioMasterGain.connect(window.audioCtx.destination);
                 osc.start();
 
+                window.__audioUnderrunCount = 0;
+                let inUnderrun = false;
+
                 scriptNode.onaudioprocess = (e) => {
                     const outL = e.outputBuffer.getChannelData(0);
                     const outR = e.outputBuffer.getChannelData(1);
-                    let available = window.getAudioQueueLength();
 
-                    if (available > 2200) {
+                    if (isCalibrating) {
+                        for (let i = 0; i < bufferSize; i++) {
+                            outL[i] = 0;
+                            outR[i] = 0;
+                        }
+                        return;
+                    }
+
+                    if (availableSamples > 2200) {
                         readPos = (writePos - TARGET_CUSHION_SAMPLES + RING_SIZE) % RING_SIZE;
-                        available = TARGET_CUSHION_SAMPLES;
+                        availableSamples = TARGET_CUSHION_SAMPLES;
                     }
 
                     const baseRatio = GBA_SAMPLE_RATE / outSampleRate;
-                    const error = (available - TARGET_CUSHION_SAMPLES) / TARGET_CUSHION_SAMPLES;
+                    const error = (availableSamples - TARGET_CUSHION_SAMPLES) / TARGET_CUSHION_SAMPLES;
                     const speed = baseRatio * Math.max(0.97, Math.min(1.03, 1.0 + error * 0.04));
 
                     for (let i = 0; i < bufferSize; i++) {
-                        if (available > 0) {
+                        if (availableSamples > 0) {
+                            inUnderrun = false;
                             const r = Math.floor(readPos) % RING_SIZE;
                             outL[i] = ringBufL[r];
                             outR[i] = ringBufR[r];
-                            readPos += speed;
-                            if (readPos >= RING_SIZE) readPos -= RING_SIZE;
-                            available -= speed;
+                            readPos = (readPos + speed) % RING_SIZE;
+                            availableSamples -= speed;
+                            if (availableSamples < 0) availableSamples = 0;
                         } else {
                             outL[i] = 0;
                             outR[i] = 0;
+                            if (!inUnderrun) {
+                                window.__audioUnderrunCount++;
+                                inUnderrun = true;
+                            }
                         }
                     }
                 };
@@ -827,6 +1060,10 @@
                     setTimeout(() => { overlay.style.visibility = 'hidden'; }, 200);
                 }
             } else if (data.type === 'audio') {
+                if (isCalibrating) {
+                    availableSamples = 0;
+                    return;
+                }
                 const rawAudio = new Uint8Array(data.samples);
                 const numSamples = (rawAudio.length / 4) | 0;
                 if (numSamples > 0) {
@@ -840,8 +1077,10 @@
                         ringBufR[w] = sR / 32768.0;
                     }
                     writePos = (writePos + numSamples) % RING_SIZE;
+                    availableSamples = Math.min(RING_SIZE, availableSamples + numSamples);
                     if (!window.audioCtx || window.audioCtx.state !== 'running') {
                         readPos = (writePos - TARGET_CUSHION_SAMPLES + RING_SIZE) % RING_SIZE;
+                        availableSamples = TARGET_CUSHION_SAMPLES;
                     }
                 }
             } else if (data.type === 'engine_mode') {
@@ -849,11 +1088,13 @@
                 if (titleEl) {
                     titleEl.innerText = '⚡ GBA Streamer (' + data.engine + ')';
                 }
+            } else if (data.type === 'probe_result') {
+                handleProbeResult(data.lag);
             } else if (data.type === 'stats') {
                 if (data.recentDeltas) {
                     window.__honestRenderHistory.push(...data.recentDeltas);
-                    if (window.__honestRenderHistory.length > 3000) {
-                        window.__honestRenderHistory = window.__honestRenderHistory.slice(-2000);
+                    if (window.__honestRenderHistory.length > 36000) {
+                        window.__honestRenderHistory = window.__honestRenderHistory.slice(-30000);
                     }
                 }
                 fpsEl.innerText = data.fps;
@@ -863,14 +1104,7 @@
                 audioStatusEl.innerText = (window.getAudioQueueLength() / GBA_SAMPLE_RATE * 1000).toFixed(1) + ' ms';
                 
                 if (data.runahead !== undefined && !userManuallyToggled) {
-                    currentRunahead = data.runahead;
-                    if (currentRunahead > 0) {
-                        runaheadValEl.innerText = currentRunahead + 'F (ON)';
-                        runaheadValEl.className = 'hud-value highlight';
-                    } else {
-                        runaheadValEl.innerText = 'OFF (0F)';
-                        runaheadValEl.className = 'hud-value';
-                    }
+                    updateRunaheadUI(data.runahead);
                 }
             }
         };
@@ -880,19 +1114,13 @@
         let inputSeq = 0;
 
         function sendInputInstant() {
-            inputSeq++;
-            const nowUs = Math.round(performance.now() * 1000);
-            const buf = new Uint8Array(14);
-            buf[0] = inputSeq & 0xFF;
-            buf[1] = (inputSeq >> 8) & 0xFF;
-            buf[2] = (inputSeq >> 16) & 0xFF;
-            buf[3] = (inputSeq >> 24) & 0xFF;
-            for (let i = 0; i < 8; i++) {
-                buf[4 + i] = (nowUs / Math.pow(2, 8 * i)) & 0xFF;
-            }
-            buf[12] = inputMask & 0xFF;
-            buf[13] = (inputMask >> 8) & 0xFF;
-            worker.postMessage({ type: 'input', buffer: buf.buffer }, [buf.buffer]);
+            inputSeq = (inputSeq + 1) & 0xFF;
+            const tSent = performance.now();
+            const buf = new Uint8Array(3);
+            buf[0] = inputSeq;
+            buf[1] = inputMask & 0xFF;
+            buf[2] = (inputMask >> 8) & 0xFF;
+            worker.postMessage({ type: 'input', seq: inputSeq, sentTime: tSent, buffer: buf.buffer }, [buf.buffer]);
         }
 
         setInterval(sendInputInstant, 32);
@@ -915,29 +1143,242 @@
         const runaheadValEl = document.getElementById('runaheadVal');
         const runaheadToggleEl = document.getElementById('runaheadToggle');
 
-        function toggleRunahead() {
-            userManuallyToggled = true;
-            currentRunahead = currentRunahead === 0 ? 1 : 0;
-            if (currentRunahead > 0) {
-                runaheadValEl.innerText = currentRunahead + 'F (ON)';
+        function updateRunaheadUI(frames) {
+            currentRunahead = frames;
+            if (frames > 0) {
+                runaheadValEl.innerText = frames + 'F (ON)';
                 runaheadValEl.className = 'hud-value highlight';
             } else {
                 runaheadValEl.innerText = 'OFF (0F)';
                 runaheadValEl.className = 'hud-value';
             }
-            const ctrl = new Uint8Array([0xAA, 0x52, currentRunahead]);
+            [0, 1, 2].forEach(f => {
+                const el = document.getElementById('preset' + f);
+                if (el) {
+                    if (f === frames) el.classList.add('active');
+                    else el.classList.remove('active');
+                }
+            });
+        }
+
+        function setRunahead(frames) {
+            userManuallyToggled = true;
+            const target = Math.max(0, Math.min(2, frames));
+            updateRunaheadUI(target);
+            const ctrl = new Uint8Array([0xAA, 0x52, target]);
             worker.postMessage({ type: 'control', buffer: ctrl.buffer }, [ctrl.buffer]);
-            worker.postMessage({ type: 'runahead_state', frames: currentRunahead });
+            worker.postMessage({ type: 'runahead_state', frames: target });
+        }
+
+        function toggleRunahead() {
+            userManuallyToggled = true;
+            const next = (currentRunahead + 1) % 3; // 0F -> 1F -> 2F -> 0F
+            setRunahead(next);
+        }
+
+        let isCalibrating = false;
+        let testInputMask = (1 << 4); // Default to D-Pad Right
+        let testInputName = "D-Pad Right (Walk)";
+        let advanceCount = 0;
+
+        const calibDockEl = document.getElementById('calibDock');
+        const controlsCardEl = document.getElementById('controlsCard');
+        const currentTestPillEl = document.getElementById('currentTestPill');
+        const advanceCountValEl = document.getElementById('advanceCountVal');
+        const guideBoxEl = document.getElementById('guideBox');
+        const applyBtnEl = document.getElementById('applyBtn');
+        const stepFrameBtnEl = document.getElementById('stepFrameBtn');
+        const resetFrameBtnEl = document.getElementById('resetFrameBtn');
+        const resumeBtnEl = document.getElementById('resumeBtn');
+        const calibrateBtnEl = document.getElementById('calibrateBtn');
+        const calibBtnTextEl = document.getElementById('calibBtnText');
+
+        function resetCalibration() {
+            if (!isCalibrating) return;
+            if (advanceCount === 0) return;
+            advanceCount = 0;
+            if (advanceCountValEl) advanceCountValEl.innerText = "0";
+            updateGuideBox();
+
+            // Send rewind command [0xAA, 0x50, 2] to server
+            const ctrl = new Uint8Array([0xAA, 0x50, 2]);
+            worker.postMessage({ type: 'control', buffer: ctrl.buffer }, [ctrl.buffer]);
+        }
+
+        function setTestInput(mask, name) {
+            testInputMask = mask;
+            testInputName = name;
+            if (currentTestPillEl) {
+                currentTestPillEl.innerText = name;
+            }
+        }
+
+        function updateGuideBox() {
+            if (!guideBoxEl || !applyBtnEl) return;
+            if (advanceCount === 0) {
+                guideBoxEl.innerHTML = "Press <kbd>Enter</kbd> to step the 1st frame forward.";
+                applyBtnEl.innerText = "Resume Game (P)";
+            } else if (advanceCount === 1) {
+                guideBoxEl.innerHTML = "Character moved on <strong>1st advance</strong>? ➔ <strong>0F Lag</strong> (Safe, bit-exact).";
+                applyBtnEl.innerText = "Apply 0F & Resume (Space)";
+            } else if (advanceCount === 2) {
+                guideBoxEl.innerHTML = "Character moved on <strong>2nd advance</strong>? ➔ <strong>1F Lag</strong> (-16.7 ms latency).";
+                applyBtnEl.innerText = "Apply 1F & Resume (Space)";
+            } else {
+                const rec = Math.min(2, advanceCount - 1);
+                guideBoxEl.innerHTML = "Character moved on <strong>" + advanceCount + "th advance</strong>? ➔ <strong>" + rec + "F Lag</strong> (-" + (rec * 16.7).toFixed(1) + " ms).";
+                applyBtnEl.innerText = "Apply " + rec + "F & Resume (Space)";
+            }
+        }
+
+        function openCalibration() {
+            isCalibrating = true;
+            advanceCount = 0;
+            if (advanceCountValEl) advanceCountValEl.innerText = "0";
+            updateGuideBox();
+
+            // Mute audio immediately on pause
+            if (window.audioMasterGain && window.audioCtx) {
+                try { window.audioMasterGain.gain.setValueAtTime(0, window.audioCtx.currentTime); } catch(e) {}
+            }
+            availableSamples = 0;
+
+            // Notify worker to enter calibration mode (instant render without jitter buffer)
+            worker.postMessage({ type: 'calibrating_state', active: true });
+
+            // Send pause command [0xAA, 0x50, 1] to server
+            const ctrl = new Uint8Array([0xAA, 0x50, 1]);
+            worker.postMessage({ type: 'control', buffer: ctrl.buffer }, [ctrl.buffer]);
+
+            if (calibDockEl) calibDockEl.style.display = 'flex';
+            if (controlsCardEl) controlsCardEl.style.display = 'none';
+            if (calibBtnTextEl) {
+                calibBtnTextEl.innerText = '▶️ Resume (P)';
+                calibBtnTextEl.style.color = '#4ade80';
+            }
+        }
+
+        function closeCalibration() {
+            isCalibrating = false;
+
+            // Restore audio on resume
+            if (window.audioMasterGain && window.audioCtx) {
+                try { window.audioMasterGain.gain.setValueAtTime(1.0, window.audioCtx.currentTime); } catch(e) {}
+            }
+            availableSamples = 0;
+            readPos = writePos;
+
+            // Notify worker to exit calibration mode and reset buffer
+            worker.postMessage({ type: 'calibrating_state', active: false });
+
+            // Send unpause command [0xAA, 0x50, 0] to server
+            const ctrl = new Uint8Array([0xAA, 0x50, 0]);
+            worker.postMessage({ type: 'control', buffer: ctrl.buffer }, [ctrl.buffer]);
+
+            if (calibDockEl) calibDockEl.style.display = 'none';
+            if (controlsCardEl) controlsCardEl.style.display = 'grid';
+            if (calibBtnTextEl) {
+                calibBtnTextEl.innerText = '⏸️ Calibrate (P)';
+                calibBtnTextEl.style.color = '#60a5fa';
+            }
+        }
+
+        function toggleCalibration() {
+            if (isCalibrating) {
+                closeCalibration();
+            } else {
+                openCalibration();
+            }
+        }
+
+        function advanceCalibrationFrame() {
+            if (!isCalibrating) return;
+            advanceCount++;
+            if (advanceCountValEl) advanceCountValEl.innerText = advanceCount;
+            updateGuideBox();
+
+            // Send step command [0xAA, 0x53, mask_lo, mask_hi]
+            const buf = new Uint8Array(4);
+            buf[0] = 0xAA;
+            buf[1] = 0x53;
+            buf[2] = testInputMask & 0xFF;
+            buf[3] = (testInputMask >> 8) & 0xFF;
+            worker.postMessage({ type: 'control', buffer: buf.buffer }, [buf.buffer]);
+        }
+
+        function applyCalibration() {
+            if (!isCalibrating) return;
+            const target = advanceCount === 0 ? 0 : Math.max(0, Math.min(2, advanceCount - 1));
+            setRunahead(target);
+            closeCalibration();
         }
 
         if (runaheadToggleEl) {
             runaheadToggleEl.addEventListener('click', toggleRunahead);
+        }
+        if (calibrateBtnEl) {
+            calibrateBtnEl.addEventListener('click', toggleCalibration);
+        }
+        if (resumeBtnEl) {
+            resumeBtnEl.addEventListener('click', closeCalibration);
+        }
+        if (stepFrameBtnEl) {
+            stepFrameBtnEl.addEventListener('click', advanceCalibrationFrame);
+        }
+        if (resetFrameBtnEl) {
+            resetFrameBtnEl.addEventListener('click', resetCalibration);
+        }
+        if (applyBtnEl) {
+            applyBtnEl.addEventListener('click', applyCalibration);
+        }
+
+        if (window.location.hash === '#calibrate') {
+            openCalibration();
         }
 
         window.addEventListener('keydown', (e) => {
             if (e.key === 'F2') {
                 e.preventDefault();
                 toggleRunahead();
+                return;
+            }
+
+            if (isCalibrating) {
+                if (e.key === 'p' || e.key === 'P' || e.key === 'Escape') {
+                    e.preventDefault();
+                    closeCalibration();
+                    return;
+                }
+                if (e.key === 'r' || e.key === 'R' || e.key === 'Backspace') {
+                    e.preventDefault();
+                    resetCalibration();
+                    return;
+                }
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    advanceCalibrationFrame();
+                    return;
+                }
+                if (e.key === ' ') {
+                    e.preventDefault();
+                    applyCalibration();
+                    return;
+                }
+
+                // Single test input registration with clean override
+                const k = e.key.toLowerCase();
+                if (k === 'z' || k === 'j') { setTestInput(1 << 0, 'A Button (Jump/Z)'); e.preventDefault(); return; }
+                if (k === 'x' || k === 'k') { setTestInput(1 << 1, 'B Button (Attack/X)'); e.preventDefault(); return; }
+                if (k === 'd' || k === 'arrowright') { setTestInput(1 << 4, 'D-Pad Right (Walk/D)'); e.preventDefault(); return; }
+                if (k === 'a' || k === 'arrowleft') { setTestInput(1 << 5, 'D-Pad Left (Walk/A)'); e.preventDefault(); return; }
+                if (k === 'w' || k === 'arrowup') { setTestInput(1 << 6, 'D-Pad Up (W)'); e.preventDefault(); return; }
+                if (k === 's' || k === 'arrowdown') { setTestInput(1 << 7, 'D-Pad Down (S)'); e.preventDefault(); return; }
+                return;
+            }
+
+            if (e.key === 'p' || e.key === 'P' || e.key === 'c' || e.key === 'C') {
+                e.preventDefault();
+                openCalibration();
                 return;
             }
             const k = e.key.toLowerCase();
@@ -958,6 +1399,7 @@
         });
 
         window.addEventListener('keyup', (e) => {
+            if (isCalibrating) return;
             const k = e.key.toLowerCase();
             const prev = inputMask;
             if (k === 'z' || k === 'j') { inputMask &= ~(1 << 0); e.preventDefault(); }

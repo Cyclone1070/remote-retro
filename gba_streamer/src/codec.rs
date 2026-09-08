@@ -10,8 +10,6 @@ pub const BLOCKS_Y: usize = GBA_HEIGHT / BLOCK_SIZE; // 20
 pub const TOTAL_BLOCKS: usize = BLOCKS_X * BLOCKS_Y; // 600
 pub const BLOCK_PIXELS: usize = BLOCK_SIZE * BLOCK_SIZE; // 64
 
-pub const DICT_CACHE_SIZE: usize = 4096;
-
 pub struct PaletteEncoder {
     color_map: HashMap<u16, u8>,
     pal_table: Vec<u16>,
@@ -20,9 +18,13 @@ pub struct PaletteEncoder {
     pal_payload: Vec<u8>,
     prev_frame: Vec<u16>,
     delta_payload: Vec<u8>,
-    tile_dict: HashMap<[u16; BLOCK_PIXELS], u16>,
-    cache_head: u16,
     frame_counter: u32,
+}
+
+impl Default for PaletteEncoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PaletteEncoder {
@@ -35,8 +37,6 @@ impl PaletteEncoder {
             pal_payload: Vec::with_capacity(2 + 512 + TOTAL_PIXELS),
             prev_frame: vec![0u16; TOTAL_PIXELS],
             delta_payload: Vec::with_capacity(2 + TOTAL_BLOCKS * (3 + BLOCK_PIXELS * 2)),
-            tile_dict: HashMap::with_capacity(DICT_CACHE_SIZE),
-            cache_head: 0,
             frame_counter: 0,
         }
     }
@@ -87,51 +87,11 @@ impl PaletteEncoder {
                         if is_solid {
                             self.delta_payload.push(0); // Mode 0: Solid
                             self.delta_payload.extend_from_slice(&first.to_le_bytes());
-                        } else if let Some(&cache_id) = self.tile_dict.get(&tile) {
-                            // Mode 1: Dynamic Dictionary Cache Hit
-                            self.delta_payload.push(1); // Mode 1: Cache Hit
-                            self.delta_payload.extend_from_slice(&cache_id.to_le_bytes());
                         } else {
-                            // Cache miss: assign next cache ID in FIFO ring
-                            let cache_id = self.cache_head;
-                            self.cache_head = (self.cache_head + 1) % (DICT_CACHE_SIZE as u16);
-                            self.tile_dict.insert(tile, cache_id);
-
-                            // Inspect palette size of tile
-                            let mut ucolors = Vec::with_capacity(16);
-                            let mut cmap = HashMap::with_capacity(16);
-                            let mut fits_16 = true;
-
-                            for &c in &tile {
-                                if !cmap.contains_key(&c) {
-                                    if ucolors.len() < 16 {
-                                        cmap.insert(c, ucolors.len() as u8);
-                                        ucolors.push(c);
-                                    } else {
-                                        fits_16 = false;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if fits_16 {
-                                // Mode 2: 4bpp nibble packed tile
-                                self.delta_payload.push(2);
-                                self.delta_payload.push(ucolors.len() as u8);
-                                for c in &ucolors {
-                                    self.delta_payload.extend_from_slice(&c.to_le_bytes());
-                                }
-                                for i in 0..32 {
-                                    let c0 = cmap[&tile[i * 2]];
-                                    let c1 = cmap[&tile[i * 2 + 1]];
-                                    self.delta_payload.push((c0 & 0x0F) | ((c1 & 0x0F) << 4));
-                                }
-                            } else {
-                                // Mode 3: Raw 64 RGB555 pixels
-                                self.delta_payload.push(3);
-                                for &p in &tile {
-                                    self.delta_payload.extend_from_slice(&p.to_le_bytes());
-                                }
+                            // Mode 1: Raw 64 RGB555 pixels
+                            self.delta_payload.push(1);
+                            for &p in &tile {
+                                self.delta_payload.extend_from_slice(&p.to_le_bytes());
                             }
                         }
                     }
@@ -147,9 +107,7 @@ impl PaletteEncoder {
             }
         }
 
-        // Full Keyframe Palette Encoding (resets dictionary)
-        self.tile_dict.clear();
-        self.cache_head = 0;
+        // Full Keyframe Palette Encoding
         self.prev_frame.copy_from_slice(raw_frame);
         self.color_map.clear();
         self.pal_table.clear();
@@ -234,7 +192,15 @@ pub const FLAG_PPU_STATE: u8 = 16; // 0x10
 pub struct PpuStateEncoder {
     prev_vram: Vec<u8>,
     prev_palette: Vec<u8>,
+    prev_oam: Vec<u8>,
+    prev_io: Vec<u8>,
     frame_counter: u32,
+}
+
+impl Default for PpuStateEncoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PpuStateEncoder {
@@ -242,8 +208,14 @@ impl PpuStateEncoder {
         Self {
             prev_vram: vec![0u8; 98304],
             prev_palette: vec![0u8; 1024],
+            prev_oam: vec![0u8; 1024],
+            prev_io: vec![0u8; 128],
             frame_counter: 0,
         }
+    }
+
+    pub fn force_keyframe(&mut self) {
+        self.frame_counter = 0;
     }
 
     pub fn encode(
@@ -255,10 +227,21 @@ impl PpuStateEncoder {
     ) -> Vec<u8> {
         self.frame_counter += 1;
 
-        let oam_comp = lz4_flex::compress_prepend_size(oam);
-        let io_comp = lz4_flex::compress_prepend_size(io);
+        let oam_comp = if self.frame_counter == 1 || oam != self.prev_oam.as_slice() {
+            self.prev_oam.copy_from_slice(oam);
+            lz4_flex::compress_prepend_size(oam)
+        } else {
+            Vec::new()
+        };
 
-        let pal_comp = if self.frame_counter % 60 == 1 || palette != self.prev_palette.as_slice() {
+        let io_comp = if self.frame_counter == 1 || io != self.prev_io.as_slice() {
+            self.prev_io.copy_from_slice(io);
+            lz4_flex::compress_prepend_size(io)
+        } else {
+            Vec::new()
+        };
+
+        let pal_comp = if self.frame_counter == 1 || palette != self.prev_palette.as_slice() {
             self.prev_palette.copy_from_slice(palette);
             lz4_flex::compress_prepend_size(palette)
         } else {
@@ -268,7 +251,7 @@ impl PpuStateEncoder {
         const BLOCK_SZ: usize = 128;
         const NUM_BLOCKS: usize = 98304 / BLOCK_SZ; // 768
 
-        let is_keyframe = self.frame_counter % 120 == 1;
+        let is_keyframe = self.frame_counter == 1;
         let mut dirty_blocks: Vec<u16> = Vec::new();
 
         if !is_keyframe {
@@ -327,6 +310,12 @@ pub struct PpuState {
     pub vram: [u8; 98304],
 }
 
+impl Default for PpuState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PpuState {
     pub fn new() -> Self {
         Self {
@@ -345,23 +334,27 @@ impl PpuState {
 
         let oam_len = u16::from_le_bytes(payload[pos..pos+2].try_into().unwrap()) as usize;
         pos += 2;
-        if pos + oam_len > payload.len() { return Err("Invalid oam len".into()); }
-        let decomp_oam = lz4_flex::decompress_size_prepended(&payload[pos..pos+oam_len])
-            .map_err(|e| format!("LZ4 OAM: {}", e))?;
-        pos += oam_len;
-        if decomp_oam.len() == 1024 {
-            self.oam.copy_from_slice(&decomp_oam);
+        if oam_len > 0 {
+            if pos + oam_len > payload.len() { return Err("Invalid oam len".into()); }
+            let decomp_oam = lz4_flex::decompress_size_prepended(&payload[pos..pos+oam_len])
+                .map_err(|e| format!("LZ4 OAM: {}", e))?;
+            pos += oam_len;
+            if decomp_oam.len() == 1024 {
+                self.oam.copy_from_slice(&decomp_oam);
+            }
         }
 
         if pos + 2 > payload.len() { return Err("Invalid io header".into()); }
         let io_len = u16::from_le_bytes(payload[pos..pos+2].try_into().unwrap()) as usize;
         pos += 2;
-        if pos + io_len > payload.len() { return Err("Invalid io len".into()); }
-        let decomp_io = lz4_flex::decompress_size_prepended(&payload[pos..pos+io_len])
-            .map_err(|e| format!("LZ4 IO: {}", e))?;
-        pos += io_len;
-        let copy_len = decomp_io.len().min(128);
-        self.io[..copy_len].copy_from_slice(&decomp_io[..copy_len]);
+        if io_len > 0 {
+            if pos + io_len > payload.len() { return Err("Invalid io len".into()); }
+            let decomp_io = lz4_flex::decompress_size_prepended(&payload[pos..pos+io_len])
+                .map_err(|e| format!("LZ4 IO: {}", e))?;
+            pos += io_len;
+            let copy_len = decomp_io.len().min(128);
+            self.io[..copy_len].copy_from_slice(&decomp_io[..copy_len]);
+        }
 
         if pos + 2 > payload.len() { return Err("Invalid pal header".into()); }
         let pal_len = u16::from_le_bytes(payload[pos..pos+2].try_into().unwrap()) as usize;
@@ -412,23 +405,21 @@ impl PpuState {
     }
 }
 
-pub struct TileCacheDecoder {
-    pub cache: Box<[[u16; BLOCK_PIXELS]; DICT_CACHE_SIZE]>,
-    pub cache_head: u16,
+pub struct FallbackDecoder {
     pub screen: Vec<u16>,
 }
 
-impl TileCacheDecoder {
+impl Default for FallbackDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FallbackDecoder {
     pub fn new() -> Self {
         Self {
-            cache: Box::new([[0u16; BLOCK_PIXELS]; DICT_CACHE_SIZE]),
-            cache_head: 0,
             screen: vec![0u16; TOTAL_PIXELS],
         }
-    }
-
-    pub fn reset_cache(&mut self) {
-        self.cache_head = 0;
     }
 
     pub fn decode(&mut self, flag: u8, video_payload: &[u8]) -> Result<&[u16], String> {
@@ -437,7 +428,6 @@ impl TileCacheDecoder {
 
         match flag {
             4 => {
-                self.reset_cache();
                 if decomp.len() < 2 { return Err("Short 4bpp".into()); }
                 let pal_len = u16::from_le_bytes(decomp[0..2].try_into().unwrap()) as usize;
                 if decomp.len() < 2 + pal_len * 2 + TOTAL_PIXELS / 2 { return Err("Short 4bpp payload".into()); }
@@ -453,7 +443,6 @@ impl TileCacheDecoder {
                 Ok(&self.screen)
             }
             2 => {
-                self.reset_cache();
                 if decomp.len() < 2 { return Err("Short 8bpp".into()); }
                 let pal_len = u16::from_le_bytes(decomp[0..2].try_into().unwrap()) as usize;
                 if decomp.len() < 2 + pal_len * 2 + TOTAL_PIXELS { return Err("Short 8bpp payload".into()); }
@@ -467,7 +456,6 @@ impl TileCacheDecoder {
                 Ok(&self.screen)
             }
             1 => {
-                self.reset_cache();
                 if decomp.len() != TOTAL_PIXELS * 2 { return Err("Raw frame size mismatch".into()); }
                 let raw_pixels = unsafe {
                     std::slice::from_raw_parts(decomp.as_ptr() as *const u16, TOTAL_PIXELS)
@@ -500,50 +488,12 @@ impl TileCacheDecoder {
                             tile.fill(c);
                         }
                         1 => {
-                            // Mode 1: Cache Hit
-                            if offset + 2 > decomp.len() { return Err("Truncated cache hit".into()); }
-                            let cache_id = u16::from_le_bytes(decomp[offset..offset + 2].try_into().unwrap()) as usize;
-                            offset += 2;
-                            if cache_id >= DICT_CACHE_SIZE { return Err("Cache ID out of bounds".into()); }
-                            tile = self.cache[cache_id];
-                        }
-                        2 => {
-                            // Mode 2: 4bpp tile miss
-                            if offset + 1 > decomp.len() { return Err("Truncated 4bpp pal_len".into()); }
-                            let pal_len = decomp[offset] as usize;
-                            offset += 1;
-                            if offset + pal_len * 2 + 32 > decomp.len() { return Err("Truncated 4bpp tile".into()); }
-                            let pal = unsafe {
-                                std::slice::from_raw_parts(decomp[offset..offset + pal_len * 2].as_ptr() as *const u16, pal_len)
-                            };
-                            offset += pal_len * 2;
-                            let packed = &decomp[offset..offset + 32];
-                            offset += 32;
-
-                            for i in 0..32 {
-                                let b = packed[i];
-                                let c0 = (b & 0x0F) as usize;
-                                let c1 = ((b >> 4) & 0x0F) as usize;
-                                tile[i * 2] = if c0 < pal_len { pal[c0] } else { 0 };
-                                tile[i * 2 + 1] = if c1 < pal_len { pal[c1] } else { 0 };
-                            }
-
-                            let head = self.cache_head as usize;
-                            self.cache[head] = tile;
-                            self.cache_head = (self.cache_head + 1) % (DICT_CACHE_SIZE as u16);
-                        }
-                        3 => {
-                            // Mode 3: Raw tile miss
+                            // Mode 1: Raw tile
                             if offset + BLOCK_PIXELS * 2 > decomp.len() { return Err("Truncated raw block".into()); }
-                            let raw = unsafe {
-                                std::slice::from_raw_parts(decomp[offset..offset + BLOCK_PIXELS * 2].as_ptr() as *const u16, BLOCK_PIXELS)
-                            };
+                            for p in 0..BLOCK_PIXELS {
+                                tile[p] = u16::from_le_bytes([decomp[offset + p * 2], decomp[offset + p * 2 + 1]]);
+                            }
                             offset += BLOCK_PIXELS * 2;
-                            tile.copy_from_slice(raw);
-
-                            let head = self.cache_head as usize;
-                            self.cache[head] = tile;
-                            self.cache_head = (self.cache_head + 1) % (DICT_CACHE_SIZE as u16);
                         }
                         _ => return Err("Invalid block mode".into()),
                     }
@@ -562,6 +512,8 @@ impl TileCacheDecoder {
         }
     }
 }
+
+pub type TileCacheDecoder = FallbackDecoder;
 
 #[cfg(test)]
 mod tests {
@@ -656,9 +608,9 @@ mod tests {
     }
 
     #[test]
-    fn test_tile_cache_hit_and_solid_roundtrip() {
+    fn test_delta_solid_and_raw_roundtrip() {
         let mut encoder = PaletteEncoder::new();
-        let mut decoder = TileCacheDecoder::new();
+        let mut decoder = FallbackDecoder::new();
 
         // Frame 1: Black keyframe
         let frame1 = vec![0x0000u16; TOTAL_PIXELS];
@@ -678,7 +630,7 @@ mod tests {
         let dec2 = decoder.decode(flag2, &comp2).unwrap();
         assert_eq!(dec2, frame2.as_slice());
 
-        // Frame 3: Introduce a multi-color pattern in block 20 (Mode 2: 4bpp Miss -> Populates cache)
+        // Frame 3: Introduce a multi-color pattern in block 20 (Mode 1: Raw block)
         let mut frame3 = frame2.clone();
         for py in 0..8 {
             for px in 0..8 {
@@ -689,25 +641,7 @@ mod tests {
         let (flag3, comp3) = encoder.encode(&frame3);
         assert_eq!(flag3, 8);
         let dec3 = decoder.decode(flag3, &comp3).unwrap();
-        assert_eq!(dec3, frame3.as_slice());
-
-        // Frame 4: Copy that EXACT same pattern to block 25 (Mode 1: Cache Hit!)
-        let mut frame4 = frame3.clone();
-        for py in 0..8 {
-            for px in 0..8 {
-                let color = if (px + py) % 2 == 0 { 0x07E0 } else { 0x001F };
-                frame4[py * GBA_WIDTH + (25 * 8 + px)] = color;
-            }
-        }
-        let (flag4, comp4) = encoder.encode(&frame4);
-        assert_eq!(flag4, 8);
-
-        // Verify that Frame 4's payload is tiny (< 25 bytes decompressed for 1 cache hit block)
-        let decomp4 = lz4_flex::decompress_size_prepended(&comp4).unwrap();
-        assert!(decomp4.len() <= 10, "Cache Hit block must be <= 10 bytes decompressed, got {}", decomp4.len());
-
-        let dec4 = decoder.decode(flag4, &comp4).unwrap();
-        assert_eq!(dec4, frame4.as_slice(), "Cache Hit must be 100% bit-exact");
+        assert_eq!(dec3, frame3.as_slice(), "Delta raw block must be bit-exact");
     }
 
     #[test]

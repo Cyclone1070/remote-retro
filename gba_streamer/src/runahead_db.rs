@@ -90,7 +90,7 @@ pub fn inspect_gba_rom<P: AsRef<Path>>(rom_path: P) -> GbaRomInfo {
         game_code: "UNKN".to_string(),
         maker_code: "00".to_string(),
         version: 0,
-        recommended_runahead: 1,
+        recommended_runahead: 0,
     };
 
     let mut file = match File::open(&rom_path) {
@@ -150,13 +150,8 @@ pub fn inspect_gba_rom<P: AsRef<Path>>(rom_path: P) -> GbaRomInfo {
         }
     }
 
-    // 2. Check pre-compiled verified DB
-    let recommended = if let Some(val) = lookup_verified_db(&code_clean) {
-        val
-    } else {
-        // 3. Fallback default
-        1
-    };
+    // 2. Check pre-compiled verified DB (fallback default 0 if not found)
+    let recommended = lookup_verified_db(&code_clean).unwrap_or_default();
 
     GbaRomInfo {
         title: title_clean,

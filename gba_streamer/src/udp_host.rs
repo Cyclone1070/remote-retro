@@ -47,7 +47,7 @@ pub async fn run_udp_host(
             let enc_us = t_enc.elapsed().as_micros() as u32;
 
             let chunk_size = 1024usize;
-            let total_chunks = (payload.len() + chunk_size - 1) / chunk_size;
+            let total_chunks = payload.len().div_ceil(chunk_size);
             for chunk_idx in 0..total_chunks {
                 let start = chunk_idx * chunk_size;
                 let end = (start + chunk_size).min(payload.len());

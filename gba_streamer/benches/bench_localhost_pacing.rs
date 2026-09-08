@@ -1,10 +1,13 @@
 use anyhow::Result;
 use std::time::{Duration, Instant};
 
-const TOTAL_SAMPLES: usize = 1000;
 const WARMUP_SAMPLES: usize = 60;
 
 fn main() -> Result<()> {
+    let total_samples: usize = std::env::var("BENCH_FRAMES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10_800);
     let core_path = std::env::var("GBA_CORE").unwrap_or_else(|_| "/usr/lib64/libretro/mgba_libretro.so".to_string());
     let rom_path = std::env::var("GBA_ROM").unwrap_or_else(|_| "/tmp/test_rom.gba".to_string());
 
@@ -19,10 +22,10 @@ fn main() -> Result<()> {
 
     let frame_budget = Duration::from_micros(16_667);
     let mut next_frame_time = Instant::now();
-    let mut intervals_ms = Vec::with_capacity(TOTAL_SAMPLES);
+    let mut intervals_ms = Vec::with_capacity(total_samples);
     let mut last_t = Instant::now();
 
-    for i in 0..TOTAL_SAMPLES {
+    for i in 0..total_samples {
         next_frame_time += frame_budget;
 
         // Step emulator directly
