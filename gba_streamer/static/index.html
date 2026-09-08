@@ -209,6 +209,11 @@
                 <span class="hud-value highlight" id="fpsVal">60.0</span>
             </div>
             <div class="divider"></div>
+            <div class="hud-item hud-button" id="pacingToggle" title="Click or press F3 to toggle Pacing (SMOOTH 1F / DIRECT 0F)">
+                <span class="hud-label">⏱️ Pacing</span>
+                <span class="hud-value highlight" id="pacingVal">SMOOTH (1F)</span>
+            </div>
+            <div class="divider"></div>
             <div class="hud-item hud-button" id="runaheadToggle" title="Click or press F2 to cycle Run-Ahead (0F / 1F / 2F)">
                 <span class="hud-label">⚡ Run-Ahead</span>
                 <span class="hud-value" id="runaheadVal">OFF (0F)</span>
@@ -225,6 +230,7 @@
             <div><strong>D-Pad:</strong> <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or <kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd></div>
             <div><strong>A / B Buttons:</strong> <kbd>Z</kbd> / <kbd>X</kbd></div>
             <div><strong>Start / Select:</strong> <kbd>Enter</kbd> / <kbd>Space</kbd></div>
+            <div><strong>Pacing Cushion:</strong> <kbd>F3</kbd> (toggle 1F / 0F)</div>
             <div><strong>Toggle Run-Ahead:</strong> <kbd>F2</kbd> (cycles 0F/1F/2F)</div>
             <div><strong>Pause & Calibrate:</strong> <kbd>P</kbd> or click button</div>
         </div>
@@ -786,6 +792,7 @@
                         totalM2P: liveOrFallbackM2P.toFixed(1),
                         netRtt: networkRtt.toFixed(1),
                         runahead: activeRunahead,
+                        pacing: pacingQueue.getMode(),
                         recentDeltas: honestRenderDeltas.slice(-30)
                     });
                     decompTimes = [];
@@ -794,31 +801,54 @@
             decompTimes.push(t1 - t0);
         }
 
-        const frameQueue = [];
+        class PacingQueue {
+            constructor(options = {}) {
+                this.mode = options.mode || 'smooth';
+                this.cushionMs = options.cushionMs ?? 16.666;
+                this.maxBacklog = options.maxBacklog ?? 3;
+                this.queue = [];
+            }
+            size() { return this.queue.length; }
+            getMode() { return this.mode; }
+            setMode(mode) {
+                if (mode === 'smooth' || mode === 'direct') {
+                    this.mode = mode;
+                }
+            }
+            push(bytes, arrivalTime = performance.now()) {
+                const targetTime = this.mode === 'smooth' ? (arrivalTime + this.cushionMs) : arrivalTime;
+                this.queue.push({ bytes, targetTime });
+                while (this.queue.length > this.maxBacklog) {
+                    this.queue.shift();
+                }
+            }
+            pop(now = performance.now()) {
+                if (this.queue.length === 0) return null;
+                if (this.mode === 'direct') {
+                    const head = this.queue.shift();
+                    return { bytes: head.bytes, blit: true };
+                }
+                const head = this.queue[0];
+                if (now >= head.targetTime || this.queue.length >= 2) {
+                    this.queue.shift();
+                    return { bytes: head.bytes, blit: true };
+                }
+                return null;
+            }
+            clear() {
+                this.queue.length = 0;
+            }
+        }
+
+        const pacingQueue = new PacingQueue({ mode: 'smooth', cushionMs: 16.666 });
         let isWorkerCalibrating = false;
         let animationFrameRunning = false;
-        let isBuffering = true;
 
         function displayTick() {
             requestAnimationFrame(displayTick);
-
-            if (isBuffering) {
-                if (frameQueue.length >= 2) {
-                    isBuffering = false;
-                } else {
-                    return;
-                }
-            }
-
-            if (frameQueue.length > 0) {
-                while (frameQueue.length > 2) {
-                    const oldBytes = frameQueue.shift();
-                    renderFrame(oldBytes, false);
-                }
-                const currentBytes = frameQueue.shift();
-                renderFrame(currentBytes, true);
-            } else {
-                isBuffering = true;
+            const frame = pacingQueue.pop(performance.now());
+            if (frame) {
+                renderFrame(frame.bytes, frame.blit);
             }
         }
 
@@ -864,7 +894,7 @@
                         if (isWorkerCalibrating) {
                             renderFrame(bytes, true);
                         } else {
-                            frameQueue.push(bytes);
+                            pacingQueue.push(bytes, performance.now());
                         }
                     }
                 };
@@ -883,10 +913,9 @@
                 activeRunahead = data.frames;
             } else if (data.type === 'calibrating_state') {
                 isWorkerCalibrating = data.active;
-                frameQueue.length = 0;
-                if (!data.active) {
-                    isBuffering = true;
-                }
+                pacingQueue.clear();
+            } else if (data.type === 'set_pacing_mode') {
+                pacingQueue.setMode(data.mode);
             } else if (data.type === 'net_rtt') {
                 networkRtt = data.rtt;
             }
@@ -1143,6 +1172,35 @@
         const runaheadValEl = document.getElementById('runaheadVal');
         const runaheadToggleEl = document.getElementById('runaheadToggle');
 
+        let currentPacingMode = localStorage.getItem('gba_pacing_mode') || 'smooth';
+        const pacingValEl = document.getElementById('pacingVal');
+        const pacingToggleEl = document.getElementById('pacingToggle');
+
+        function updatePacingUI(mode) {
+            currentPacingMode = mode;
+            localStorage.setItem('gba_pacing_mode', mode);
+            if (pacingValEl) {
+                if (mode === 'smooth') {
+                    pacingValEl.innerText = 'SMOOTH (1F)';
+                    pacingValEl.className = 'hud-value highlight';
+                } else {
+                    pacingValEl.innerText = 'DIRECT (0F)';
+                    pacingValEl.className = 'hud-value';
+                }
+            }
+            worker.postMessage({ type: 'set_pacing_mode', mode: mode });
+        }
+
+        function togglePacing() {
+            const next = currentPacingMode === 'smooth' ? 'direct' : 'smooth';
+            updatePacingUI(next);
+        }
+
+        if (pacingToggleEl) {
+            pacingToggleEl.addEventListener('click', togglePacing);
+        }
+        updatePacingUI(currentPacingMode);
+
         function updateRunaheadUI(frames) {
             currentRunahead = frames;
             if (frames > 0) {
@@ -1340,6 +1398,11 @@
             if (e.key === 'F2') {
                 e.preventDefault();
                 toggleRunahead();
+                return;
+            }
+            if (e.key === 'F3') {
+                e.preventDefault();
+                togglePacing();
                 return;
             }
 
