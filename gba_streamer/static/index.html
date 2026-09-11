@@ -392,6 +392,187 @@
         }
         .apply-btn:hover { background: #15803d; }
         .apply-btn:active { transform: scale(0.97); }
+
+        /* ROM Selection Overlay */
+        .rom-select-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(3, 7, 18, 0.85);
+            backdrop-filter: blur(24px);
+            -webkit-backdrop-filter: blur(24px);
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            animation: fadeIn 0.2s ease-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: scale(0.98); }
+            to { opacity: 1; transform: scale(1); }
+        }
+        .rom-select-modal {
+            background: rgba(17, 24, 39, 0.95);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 20px;
+            width: 100%;
+            max-width: 720px;
+            max-height: 85vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+            overflow: hidden;
+        }
+        .rom-modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 24px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        .rom-modal-title {
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: #f3f4f6;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .rom-modal-sub {
+            font-size: 0.8rem;
+            color: #9ca3af;
+            margin-top: 2px;
+        }
+        .rom-modal-close {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: #9ca3af;
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            transition: all 0.15s ease;
+        }
+        .rom-modal-close:hover {
+            background: rgba(255, 255, 255, 0.15);
+            color: #fff;
+        }
+        .rom-grid {
+            padding: 20px 24px;
+            overflow-y: auto;
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 16px;
+        }
+        .rom-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 14px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            position: relative;
+        }
+        .rom-card:hover {
+            background: rgba(59, 130, 246, 0.08);
+            border-color: rgba(96, 165, 250, 0.4);
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px -5px rgba(0, 0, 0, 0.5);
+        }
+        .rom-card.active-game {
+            border-color: rgba(74, 222, 128, 0.5);
+            background: rgba(74, 222, 128, 0.05);
+        }
+        .rom-card-icon {
+            font-size: 2rem;
+            line-height: 1;
+        }
+        .rom-card-title {
+            font-weight: 700;
+            font-size: 0.95rem;
+            color: #f9fafb;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .rom-card-meta {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 0.72rem;
+            color: #9ca3af;
+            font-family: monospace;
+        }
+        .rom-card-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: rgba(255, 255, 255, 0.08);
+            color: #60a5fa;
+            font-size: 0.7rem;
+            font-weight: 600;
+        }
+        .rom-card-badge.active-badge {
+            background: rgba(74, 222, 128, 0.15);
+            color: #4ade80;
+        }
+        .rom-card-btn {
+            background: linear-gradient(135deg, #2563eb, #1d4ed8);
+            color: #fff;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            margin-top: 4px;
+        }
+        .rom-card-btn:hover {
+            background: linear-gradient(135deg, #3b82f6, #2563eb);
+        }
+        .rom-dropzone {
+            padding: 16px 24px;
+            margin: 0 24px 20px;
+            background: rgba(255, 255, 255, 0.02);
+            border: 2px dashed rgba(255, 255, 255, 0.15);
+            border-radius: 14px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .rom-dropzone:hover, .rom-dropzone.drag-over {
+            border-color: #60a5fa;
+            background: rgba(59, 130, 246, 0.05);
+        }
+        .dropzone-icon {
+            font-size: 1.5rem;
+        }
+        .dropzone-text {
+            font-size: 0.78rem;
+            color: #9ca3af;
+        }
+        .dropzone-btn {
+            background: rgba(255, 255, 255, 0.08);
+            color: #e5e7eb;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            padding: 4px 12px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            cursor: pointer;
+        }
     </style>
 </head>
 <body>
@@ -402,6 +583,9 @@
                 <span>GBA Streamer</span>
             </div>
             <div class="top-actions">
+                <button id="romSelectBtn" class="settings-trigger-btn" style="background: rgba(59, 130, 246, 0.2); border-color: rgba(96, 165, 250, 0.4); color: #93c5fd;" aria-label="Select Game">
+                    🎮 Change Game
+                </button>
                 <div class="quick-status-pill">
                     <span class="status-dot"></span>
                     <span id="fpsBadge" class="pill-highlight">60.0 FPS</span>
@@ -502,6 +686,10 @@
                     <span>Latency Tuning (<kbd>P</kbd>)</span>
                     <span style="color: #60a5fa;" id="calibBtnText">⏸️ Calibrate (P)</span>
                 </button>
+                <button class="sidebar-btn" id="exitRomBtn" style="color: #f87171;" title="Exit current game to ROM selection screen">
+                    <span>🚪 Exit Game to Menu</span>
+                    <span style="color: #f87171;">Exit</span>
+                </button>
             </div>
         </div>
 
@@ -550,6 +738,30 @@
             </div>
         </div>
     </aside>
+
+    <!-- Modern Fullscreen ROM Selection & Gallery Modal -->
+    <div id="romSelectOverlay" class="rom-select-overlay" style="display: none;">
+        <div class="rom-select-modal">
+            <div class="rom-modal-header">
+                <div>
+                    <div class="rom-modal-title">🎮 GBA Game Library</div>
+                    <div class="rom-modal-sub">Choose a game to stream bit-exact at 60 FPS</div>
+                </div>
+                <button class="rom-modal-close" id="closeRomSelectBtn" aria-label="Close Game Selection">✕</button>
+            </div>
+
+            <div class="rom-grid" id="romCardGrid">
+                <!-- Dynamically populated -->
+            </div>
+
+            <div class="rom-dropzone" id="romDropZone">
+                <input type="file" id="romFileInput" accept=".gba,.bin" style="display: none;">
+                <div class="dropzone-icon">📁</div>
+                <div class="dropzone-text">Drag & drop any <code>.gba</code> ROM here to upload & play instantly</div>
+                <button class="dropzone-btn" onclick="document.getElementById('romFileInput').click()">Browse File</button>
+            </div>
+        </div>
+    </div>
 
     <!-- WebWorker Source Code -->
     <script id="workerCode" type="javascript/worker">
@@ -1200,9 +1412,54 @@
                         if (audioLen > 0 && bytes.length >= 4 + audioLen) {
                             try {
                                 const audioPayload = bytes.subarray(4, 4 + audioLen);
-                                const rawAudio = lz4Decompress(audioPayload, 4096);
-                                const audioCopy = new Uint8Array(rawAudio);
-                                postMessage({ type: 'audio', samples: audioCopy.buffer }, [audioCopy.buffer]);
+                                const raw = lz4Decompress(audioPayload, 8192);
+                                if (raw.length >= 3) {
+                                    const mode = raw[0];
+                                    if (mode === 1) {
+                                        // Mode 1: Mono DPCM Byte-Split (N mono samples -> N*2 stereo interleaved)
+                                        const numPairs = raw[1] | (raw[2] << 8);
+                                        const outSamples = new Int16Array(numPairs * 2);
+                                        const loOffset = 3;
+                                        const hiOffset = 3 + numPairs;
+                                        let curr = 0;
+                                        for (let i = 0; i < numPairs; i++) {
+                                            const diffU = raw[loOffset + i] | (raw[hiOffset + i] << 8);
+                                            const diff = diffU >= 0x8000 ? diffU - 0x10000 : diffU;
+                                            curr = (curr + diff) & 0xFFFF;
+                                            const sample = curr >= 0x8000 ? curr - 0x10000 : curr;
+                                            outSamples[i * 2] = sample;
+                                            outSamples[i * 2 + 1] = sample;
+                                        }
+                                        postMessage({ type: 'audio', samples: outSamples.buffer }, [outSamples.buffer]);
+                                    } else if (mode === 2) {
+                                        // Mode 2: Stereo Mid-Side DPCM Byte-Split
+                                        const numPairs = raw[1] | (raw[2] << 8);
+                                        const outSamples = new Int16Array(numPairs * 2);
+                                        const totalBytes = numPairs * 2;
+                                        const loOffset = 3;
+                                        const hiOffset = 3 + totalBytes;
+                                        let prevM = 0;
+                                        let prevS = 0;
+                                        for (let i = 0; i < numPairs; i++) {
+                                            const diffMu = raw[loOffset + i * 2] | (raw[hiOffset + i * 2] << 8);
+                                            const diffM = diffMu >= 0x8000 ? diffMu - 0x10000 : diffMu;
+                                            const diffSu = raw[loOffset + i * 2 + 1] | (raw[hiOffset + i * 2 + 1] << 8);
+                                            const diffS = diffSu >= 0x8000 ? diffSu - 0x10000 : diffSu;
+                                            prevM = (prevM + diffM) & 0xFFFF;
+                                            prevS = (prevS + diffS) & 0xFFFF;
+                                            const m = prevM >= 0x8000 ? prevM - 0x10000 : prevM;
+                                            const s = prevS >= 0x8000 ? prevS - 0x10000 : prevS;
+                                            const l = m;
+                                            const r = (s + l) & 0xFFFF;
+                                            outSamples[i * 2] = l;
+                                            outSamples[i * 2 + 1] = r >= 0x8000 ? r - 0x10000 : r;
+                                        }
+                                        postMessage({ type: 'audio', samples: outSamples.buffer }, [outSamples.buffer]);
+                                    } else {
+                                        const audioCopy = new Uint8Array(raw.subarray(1));
+                                        postMessage({ type: 'audio', samples: audioCopy.buffer }, [audioCopy.buffer]);
+                                    }
+                                }
                             } catch(err) {}
                         }
 
@@ -1412,14 +1669,12 @@
                     availableSamples = 0;
                     return;
                 }
-                const rawAudio = new Uint8Array(data.samples);
-                const numSamples = (rawAudio.length / 4) | 0;
+                const samples = new Int16Array(data.samples);
+                const numSamples = (samples.length / 2) | 0;
                 if (numSamples > 0) {
                     for (let i = 0; i < numSamples; i++) {
-                        let sL = (rawAudio[i * 4] | (rawAudio[i * 4 + 1] << 8));
-                        if (sL >= 0x8000) sL -= 0x10000;
-                        let sR = (rawAudio[i * 4 + 2] | (rawAudio[i * 4 + 3] << 8));
-                        if (sR >= 0x8000) sR -= 0x10000;
+                        const sL = samples[i * 2];
+                        const sR = samples[i * 2 + 1];
                         const w = (writePos + i) % RING_SIZE;
                         ringBufL[w] = sL / 32768.0;
                         ringBufR[w] = sR / 32768.0;
@@ -1810,7 +2065,178 @@
             openCalibration();
         }
 
+        // ==========================================
+        // ROM Selection & Game Switch Coordinator
+        // ==========================================
+        let currentRomsList = [];
+        window.currentActiveRomId = null;
+        const romSelectOverlay = document.getElementById('romSelectOverlay');
+        const romCardGrid = document.getElementById('romCardGrid');
+        const romSelectBtn = document.getElementById('romSelectBtn');
+        const exitRomBtn = document.getElementById('exitRomBtn');
+        const closeRomSelectBtn = document.getElementById('closeRomSelectBtn');
+        const romDropZone = document.getElementById('romDropZone');
+        const romFileInput = document.getElementById('romFileInput');
+
+        async function fetchAndRenderRoms() {
+            try {
+                const res = await fetch('/api/roms');
+                if (!res.ok) return;
+                currentRomsList = await res.json();
+                renderRomCards(currentRomsList);
+            } catch(err) {
+                console.error("Failed to fetch ROMs:", err);
+            }
+        }
+
+        function renderRomCards(roms) {
+            if (!romCardGrid) return;
+            if (!roms || roms.length === 0) {
+                romCardGrid.innerHTML = '<div style="color: #9ca3af; grid-column: 1/-1; text-align: center; padding: 20px;">No .gba ROMs found in /tmp or ./roms. Drop a ROM below!</div>';
+                return;
+            }
+
+            let html = '';
+            for (const rom of roms) {
+                const isCurrent = window.currentActiveRomId ? (window.currentActiveRomId === rom.id) : false;
+                const sizeMb = (rom.size_bytes / (1024 * 1024)).toFixed(1) + ' MB';
+                const icon = rom.title.toLowerCase().includes('stunt') ? '🏎️' :
+                             rom.title.toLowerCase().includes('worm') ? '🐛' :
+                             rom.title.toLowerCase().includes('zelda') ? '🗡️' :
+                             rom.title.toLowerCase().includes('mario') ? '🍄' : '🎮';
+
+                html += `
+                    <div class="rom-card ${isCurrent ? 'active-game' : ''}" onclick="window.switchRom('${encodeURIComponent(rom.id)}')">
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                            <span class="rom-card-icon">${icon}</span>
+                            <span class="rom-card-badge ${isCurrent ? 'active-badge' : ''}">${isCurrent ? 'ACTIVE' : rom.code}</span>
+                        </div>
+                        <div class="rom-card-title" title="${rom.title}">${rom.title}</div>
+                        <div class="rom-card-meta">
+                            <span>${rom.code}</span>
+                            <span>${sizeMb}</span>
+                        </div>
+                        <button class="rom-card-btn">${isCurrent ? '▶ Resume' : '▶ Play'}</button>
+                    </div>
+                `;
+            }
+            romCardGrid.innerHTML = html;
+        }
+
+        function openRomSelect() {
+            const sidebar = document.getElementById('settingsSidebar');
+            if (sidebar && sidebar.hidePopover && sidebar.matches(':popover-open')) {
+                sidebar.hidePopover();
+            }
+            if (romSelectOverlay) romSelectOverlay.style.display = 'flex';
+            fetchAndRenderRoms();
+        }
+
+        function closeRomSelect() {
+            if (romSelectOverlay) romSelectOverlay.style.display = 'none';
+        }
+
+        function switchRom(encodedRomId) {
+            const romId = decodeURIComponent(encodedRomId);
+            window.currentActiveRomId = romId;
+            closeRomSelect();
+
+            // Send switch command [0xAA, 0x59, ...utf8(romId)]
+            const idBytes = new TextEncoder().encode(romId);
+            const ctrl = new Uint8Array(2 + idBytes.length);
+            ctrl[0] = 0xAA;
+            ctrl[1] = 0x59;
+            ctrl.set(idBytes, 2);
+            worker.postMessage({ type: 'control', buffer: ctrl.buffer }, [ctrl.buffer]);
+
+            // Flash loading indicator
+            const overlay = document.getElementById('loadingOverlay');
+            if (overlay) {
+                const title = overlay.querySelector('.load-title');
+                if (title) title.innerText = '⚡ Loading ' + romId + '...';
+                overlay.style.visibility = 'visible';
+                overlay.style.opacity = '1';
+                setTimeout(() => {
+                    overlay.style.opacity = '0';
+                    setTimeout(() => { overlay.style.visibility = 'hidden'; }, 250);
+                }, 700);
+            }
+        }
+        window.switchRom = switchRom;
+
+        function exitCurrentRom() {
+            // Send exit command [0xAA, 0x5B]
+            const ctrl = new Uint8Array([0xAA, 0x5B]);
+            worker.postMessage({ type: 'control', buffer: ctrl.buffer }, [ctrl.buffer]);
+
+            // Mute audio
+            if (window.audioMasterGain && window.audioCtx) {
+                try { window.audioMasterGain.gain.setValueAtTime(0, window.audioCtx.currentTime); } catch(e) {}
+            }
+            availableSamples = 0;
+
+            openRomSelect();
+        }
+        window.exitCurrentRom = exitCurrentRom;
+        window.openRomSelect = openRomSelect;
+        window.closeRomSelect = closeRomSelect;
+
+        if (romSelectBtn) romSelectBtn.addEventListener('click', openRomSelect);
+        if (exitRomBtn) exitRomBtn.addEventListener('click', exitCurrentRom);
+        if (closeRomSelectBtn) closeRomSelectBtn.addEventListener('click', closeRomSelect);
+
+        if (romFileInput) {
+            romFileInput.addEventListener('change', async (e) => {
+                const file = e.target.files[0];
+                if (file) await uploadAndLaunchRom(file);
+            });
+        }
+        if (romDropZone) {
+            romDropZone.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                romDropZone.classList.add('drag-over');
+            });
+            romDropZone.addEventListener('dragleave', () => {
+                romDropZone.classList.remove('drag-over');
+            });
+            romDropZone.addEventListener('drop', async (e) => {
+                e.preventDefault();
+                romDropZone.classList.remove('drag-over');
+                if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                    const file = e.dataTransfer.files[0];
+                    if (file.name.toLowerCase().endsWith('.gba') || file.name.toLowerCase().endsWith('.bin')) {
+                        await uploadAndLaunchRom(file);
+                    } else {
+                        alert("Please drop a .gba ROM file.");
+                    }
+                }
+            });
+        }
+
+        async function uploadAndLaunchRom(file) {
+            try {
+                const res = await fetch('/api/upload/' + encodeURIComponent(file.name), {
+                    method: 'POST',
+                    body: file
+                });
+                if (res.ok) {
+                    await fetchAndRenderRoms();
+                    switchRom(file.name);
+                }
+            } catch(err) {
+                console.error("Upload failed:", err);
+            }
+        }
+
         window.addEventListener('keydown', (e) => {
+            if (romSelectOverlay && romSelectOverlay.style.display === 'flex') {
+                if (e.key === 'Escape') {
+                    closeRomSelect();
+                    e.preventDefault();
+                }
+                return;
+            }
+
             const sidebar = document.getElementById('settingsSidebar');
             if (sidebar && sidebar.matches && sidebar.matches(':popover-open')) {
                 if (e.key === 'Escape') {
@@ -1887,6 +2313,9 @@
         });
 
         window.addEventListener('keyup', (e) => {
+            if (romSelectOverlay && romSelectOverlay.style.display === 'flex') {
+                return;
+            }
             const sidebar = document.getElementById('settingsSidebar');
             if (sidebar && sidebar.matches && sidebar.matches(':popover-open')) {
                 return;

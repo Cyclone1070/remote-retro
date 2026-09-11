@@ -1,6 +1,7 @@
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
-use std::sync::{atomic::{AtomicI16, AtomicU32, Ordering}, Arc};
+use std::path::PathBuf;
+use std::sync::{atomic::{AtomicI16, AtomicU32, Ordering}, Arc, Mutex};
 use std::time::{Duration, Instant};
 use warp::ws::Ws;
 use warp::Filter;
@@ -10,6 +11,54 @@ use crate::core::RetroCore;
 
 const BROWSER_HTML: &str = include_str!("../static/index.html");
 const BROWSER_WASM: &[u8] = include_bytes!("../static/gba_ppu.wasm");
+
+pub struct RomInfoEntry {
+    pub id: String,
+    pub title: String,
+    pub code: String,
+    pub size_bytes: u64,
+    pub path: PathBuf,
+}
+
+pub fn scan_available_roms() -> Vec<RomInfoEntry> {
+    let mut entries = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+
+    let search_dirs = [
+        PathBuf::from("/tmp"),
+        PathBuf::from("./roms"),
+        PathBuf::from("."),
+    ];
+
+    for dir in &search_dirs {
+        if let Ok(read_dir) = std::fs::read_dir(dir) {
+            for entry in read_dir.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(ext) = path.extension() {
+                        if ext.eq_ignore_ascii_case("gba") {
+                            let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                            if !seen_ids.contains(&filename) {
+                                seen_ids.insert(filename.clone());
+                                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                                let info = crate::runahead_db::inspect_gba_rom(path.to_str().unwrap_or_default());
+                                entries.push(RomInfoEntry {
+                                    id: filename,
+                                    title: info.title,
+                                    code: info.game_code,
+                                    size_bytes: size,
+                                    path,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    entries.sort_by(|a, b| a.title.cmp(&b.title));
+    entries
+}
 
 pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String) -> Result<()> {
     println!("=== Starting GBA WebHost (A/V Synchronized Bit-Exact Stream) ===");
@@ -27,7 +76,8 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
     let probe_trigger = Arc::new(std::sync::atomic::AtomicI32::new(-1));
     let is_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let step_trigger = Arc::new(std::sync::atomic::AtomicI32::new(-1));
-    let rom_game_code = core.rom_game_code.clone();
+    let rom_game_code = Arc::new(Mutex::new(core.rom_game_code.clone()));
+    let switch_rom_req = Arc::new(Mutex::new(None::<String>));
 
     // Stream mode: 0 = Pixel XOR (Default), 1 = PPU State (Optional)
     let initial_mode = match std::env::var("STREAM_MODE").as_deref() {
@@ -45,6 +95,8 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
     let is_paused_producer = is_paused.clone();
     let step_producer = step_trigger.clone();
     let stream_mode_producer = stream_mode.clone();
+    let switch_rom_producer = switch_rom_req.clone();
+    let rom_game_code_producer = rom_game_code.clone();
 
     std::thread::spawn(move || {
         let mut ppu_enc = PpuStateEncoder::new();
@@ -66,6 +118,27 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
         let mut was_paused = false;
 
         loop {
+            // Check for pending ROM switch request
+            let switch_opt = switch_rom_producer.lock().unwrap().take();
+            if let Some(target_rom_id) = switch_opt {
+                println!("🔄 Switching active ROM to '{}'...", target_rom_id);
+                let available = scan_available_roms();
+                if let Some(entry) = available.iter().find(|e| e.id == target_rom_id || e.title.eq_ignore_ascii_case(&target_rom_id) || e.code.eq_ignore_ascii_case(&target_rom_id)) {
+                    if let Ok(_) = core.reload_rom(entry.path.to_str().unwrap_or_default()) {
+                        *rom_game_code_producer.lock().unwrap() = core.rom_game_code.clone();
+                        let new_runahead = core.runahead_frames;
+                        runahead_producer.store(new_runahead, Ordering::Relaxed);
+                        ppu_enc.force_keyframe();
+                        fallback_enc.force_keyframe();
+                        force_keyframe_producer.store(true, Ordering::Relaxed);
+                        is_paused_producer.store(false, Ordering::Relaxed);
+                        was_paused = false;
+                        calib_checkpoint = vec![0u8; core.state_size()];
+                        println!("🎮 Active Game Switched: '{}' [{}] -> Run-Ahead: {}F", core.rom_title, core.rom_game_code, new_runahead);
+                    }
+                }
+            }
+
             let is_p = is_paused_producer.load(Ordering::Relaxed);
             if is_p {
                 if !was_paused {
@@ -259,6 +332,7 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
     let step_for_ws = step_trigger.clone();
     let game_code_ws = rom_game_code.clone();
     let stream_mode_consumer = stream_mode.clone();
+    let switch_rom_consumer_ws = switch_rom_req.clone();
 
     let ws_route = warp::path("ws")
         .and(warp::ws())
@@ -274,6 +348,7 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
             let step_signal_ws = step_for_ws.clone();
             let game_code = game_code_ws.clone();
             let stream_mode_ws = stream_mode_consumer.clone();
+            let switch_rom_ws = switch_rom_consumer_ws.clone();
 
             ws.on_upgrade(move |websocket| async move {
                     let (mut ws_sender, mut ws_receiver) = websocket.split();
@@ -291,13 +366,21 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
                                 } else if bytes.len() == 3 && bytes[0] == 0xAA && bytes[1] == 0x52 {
                                     let target_f = bytes[2].min(2);
                                     runahead.store(target_f, Ordering::Relaxed);
-                                    crate::runahead_db::cache_measured_runahead(game_code.clone(), target_f);
+                                    let cur_code = game_code.lock().unwrap().clone();
+                                    crate::runahead_db::cache_measured_runahead(cur_code, target_f);
                                     println!("Client set Run-Ahead to: {}F (saved to config)", target_f);
                                 } else if bytes.len() >= 3 && bytes[0] == 0xAA && bytes[1] == 0x57 {
                                     let mode = bytes[2];
                                     stream_mode_ws.store(mode, Ordering::Relaxed);
                                     keyframe_clone.store(true, Ordering::Relaxed);
                                     println!("Client switched stream mode to: {}", if mode == 1 { "PPU State (Optional)" } else { "Pixel XOR Delta (Default)" });
+                                } else if bytes.len() >= 3 && bytes[0] == 0xAA && bytes[1] == 0x59 {
+                                    let rom_id = String::from_utf8_lossy(&bytes[2..]).trim().to_string();
+                                    switch_rom_ws.lock().unwrap().replace(rom_id.clone());
+                                    println!("Client requested switch to ROM: {}", rom_id);
+                                } else if bytes.len() >= 2 && bytes[0] == 0xAA && bytes[1] == 0x5B {
+                                    is_paused_signal.store(true, Ordering::Relaxed);
+                                    println!("Client exited to ROM selection menu");
                                 } else if bytes.len() >= 3 && bytes[0] == 0xAA && bytes[1] == 0x50 {
                                     let p = bytes[2];
                                     if p == 2 {
@@ -363,7 +446,61 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
                 })
         });
 
-    let routes = html_route.or(ping_route).or(wasm_route).or(ws_route);
+    let roms_route = warp::path!("api" / "roms")
+        .and(warp::get())
+        .map(|| {
+            let roms = scan_available_roms();
+            let json = format!(
+                "[{}]",
+                roms.iter()
+                    .map(|r| format!(
+                        r#"{{"id":"{}","title":"{}","code":"{}","size_bytes":{}}}"#,
+                        r.id, r.title, r.code, r.size_bytes
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+            warp::reply::with_header(
+                warp::reply::with_header(json, "Content-Type", "application/json"),
+                "Cache-Control",
+                "no-cache",
+            )
+        });
+
+    let switch_rom_for_http = switch_rom_req.clone();
+    let switch_route = warp::path!("api" / "switch_rom")
+        .and(warp::post())
+        .and(warp::query::<std::collections::HashMap<String, String>>())
+        .map(move |params: std::collections::HashMap<String, String>| {
+            if let Some(rom_id) = params.get("rom") {
+                switch_rom_for_http.lock().unwrap().replace(rom_id.clone());
+                warp::reply::html(format!("{{\"status\":\"ok\",\"rom\":\"{}\"}}", rom_id))
+            } else {
+                warp::reply::html("{\"error\":\"Missing rom parameter\"}".to_string())
+            }
+        });
+
+    let upload_route = warp::path!("api" / "upload" / String)
+        .and(warp::post())
+        .and(warp::body::bytes())
+        .map(|filename: String, bytes: warp::hyper::body::Bytes| {
+            let safe_name = PathBuf::from(filename).file_name().unwrap_or_default().to_string_lossy().to_string();
+            let dest_dir = PathBuf::from("./roms");
+            let _ = std::fs::create_dir_all(&dest_dir);
+            let dest = dest_dir.join(&safe_name);
+            match std::fs::write(&dest, &bytes) {
+                Ok(_) => warp::reply::html(format!("{{\"status\":\"ok\",\"file\":\"{}\"}}", safe_name)),
+                Err(e) => warp::reply::html(format!("{{\"error\":\"{}\"}}", e)),
+            }
+        });
+
+    let routes = html_route
+        .or(ping_route)
+        .or(wasm_route)
+        .or(roms_route)
+        .or(switch_route)
+        .or(upload_route)
+        .or(ws_route);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("⚡ Socket TCP_NODELAY active on all incoming connections!");
     let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener).map(|res| {

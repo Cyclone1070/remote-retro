@@ -154,6 +154,7 @@ unsafe extern "C" fn environment_callback(cmd: c_uint, data: *mut c_void) -> boo
 
 pub struct RetroCore {
     _lib: &'static Library,
+    pub core_path: String,
     retro_run: Symbol<'static, unsafe extern "C" fn()>,
     retro_serialize: Option<Symbol<'static, unsafe extern "C" fn(*mut c_void, usize) -> bool>>,
     retro_unserialize: Option<Symbol<'static, unsafe extern "C" fn(*const c_void, usize) -> bool>>,
@@ -164,6 +165,12 @@ pub struct RetroCore {
 }
 
 impl RetroCore {
+    pub fn reload_rom(&mut self, new_rom_path: &str) -> Result<()> {
+        let new_core = Self::load(&self.core_path, new_rom_path)?;
+        *self = new_core;
+        Ok(())
+    }
+
     pub fn load(core_path: &str, rom_path: &str) -> Result<Self> {
         let rom_info = crate::runahead_db::inspect_gba_rom(rom_path);
         println!(
@@ -251,6 +258,7 @@ impl RetroCore {
 
             Ok(Self {
                 _lib: lib,
+                core_path: core_path.to_string(),
                 retro_run,
                 retro_serialize,
                 retro_unserialize,

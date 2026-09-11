@@ -169,6 +169,8 @@ pub struct AudioEncoder {
     buffer: Vec<i16>,
 }
 
+pub struct AudioDecoder;
+
 impl AudioEncoder {
     pub fn new(sample_rate: u32) -> Self {
         Self {
@@ -185,12 +187,146 @@ impl AudioEncoder {
         if self.buffer.is_empty() {
             return None;
         }
-        let byte_slice = unsafe {
-            std::slice::from_raw_parts(self.buffer.as_ptr() as *const u8, self.buffer.len() * 2)
+
+        let num_stereo_pairs = self.buffer.len() / 2;
+        if num_stereo_pairs == 0 {
+            self.buffer.clear();
+            return None;
+        }
+
+        let is_mono = self.buffer.chunks_exact(2).all(|c| c[0] == c[1]);
+
+        let payload = if is_mono {
+            // Mode 1: Mono DPCM + Byte-Split (50%+ bandwidth reduction, 100% bit-exact)
+            let mut raw = Vec::with_capacity(3 + num_stereo_pairs * 2);
+            raw.push(1u8); // Mode 1: Mono DPCM Byte-Split
+            raw.extend_from_slice(&(num_stereo_pairs as u16).to_le_bytes());
+
+            let mut lo = Vec::with_capacity(num_stereo_pairs);
+            let mut hi = Vec::with_capacity(num_stereo_pairs);
+            let mut prev = 0i16;
+
+            for i in 0..num_stereo_pairs {
+                let s = self.buffer[i * 2];
+                let diff = s.wrapping_sub(prev);
+                prev = s;
+                lo.push((diff & 0xFF) as u8);
+                hi.push(((diff >> 8) & 0xFF) as u8);
+            }
+            raw.extend_from_slice(&lo);
+            raw.extend_from_slice(&hi);
+            raw
+        } else {
+            // Mode 2: Stereo Mid-Side DPCM + Byte-Split (100% bit-exact)
+            let mut raw = Vec::with_capacity(3 + num_stereo_pairs * 4);
+            raw.push(2u8); // Mode 2: Stereo Mid-Side DPCM Byte-Split
+            raw.extend_from_slice(&(num_stereo_pairs as u16).to_le_bytes());
+
+            let mut lo = Vec::with_capacity(num_stereo_pairs * 2);
+            let mut hi = Vec::with_capacity(num_stereo_pairs * 2);
+            let mut prev_m = 0i16;
+            let mut prev_s = 0i16;
+
+            for i in 0..num_stereo_pairs {
+                let l = self.buffer[i * 2];
+                let r = self.buffer[i * 2 + 1];
+                let m = l;
+                let s = r.wrapping_sub(l);
+                let diff_m = m.wrapping_sub(prev_m);
+                let diff_s = s.wrapping_sub(prev_s);
+                prev_m = m;
+                prev_s = s;
+                lo.push((diff_m & 0xFF) as u8);
+                hi.push(((diff_m >> 8) & 0xFF) as u8);
+                lo.push((diff_s & 0xFF) as u8);
+                hi.push(((diff_s >> 8) & 0xFF) as u8);
+            }
+            raw.extend_from_slice(&lo);
+            raw.extend_from_slice(&hi);
+            raw
         };
-        let compressed = lz4_flex::compress_prepend_size(byte_slice);
+
+        let compressed = lz4_flex::compress_prepend_size(&payload);
         self.buffer.clear();
         Some(compressed)
+    }
+}
+
+impl AudioDecoder {
+    pub fn decode(payload: &[u8]) -> Result<Vec<i16>, String> {
+        let decomp = lz4_flex::decompress_size_prepended(payload)
+            .map_err(|e| format!("Audio LZ4 decompress failed: {:?}", e))?;
+        if decomp.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mode = decomp[0];
+        match mode {
+            1 => {
+                // Mode 1: Mono DPCM Byte-Split
+                if decomp.len() < 3 {
+                    return Err("Truncated mono audio header".into());
+                }
+                let num_pairs = u16::from_le_bytes([decomp[1], decomp[2]]) as usize;
+                if decomp.len() < 3 + num_pairs * 2 {
+                    return Err("Truncated mono audio payload".into());
+                }
+                let lo = &decomp[3..3 + num_pairs];
+                let hi = &decomp[3 + num_pairs..3 + num_pairs * 2];
+
+                let mut out = Vec::with_capacity(num_pairs * 2);
+                let mut curr = 0i16;
+                for i in 0..num_pairs {
+                    let diff = i16::from_le_bytes([lo[i], hi[i]]);
+                    curr = curr.wrapping_add(diff);
+                    out.push(curr);
+                    out.push(curr);
+                }
+                Ok(out)
+            }
+            2 => {
+                // Mode 2: Stereo Mid-Side DPCM Byte-Split
+                if decomp.len() < 3 {
+                    return Err("Truncated stereo audio header".into());
+                }
+                let num_pairs = u16::from_le_bytes([decomp[1], decomp[2]]) as usize;
+                if decomp.len() < 3 + num_pairs * 4 {
+                    return Err("Truncated stereo audio payload".into());
+                }
+                let total_bytes = num_pairs * 2;
+                let lo = &decomp[3..3 + total_bytes];
+                let hi = &decomp[3 + total_bytes..3 + total_bytes * 2];
+
+                let mut out = Vec::with_capacity(num_pairs * 2);
+                let mut prev_m = 0i16;
+                let mut prev_s = 0i16;
+                for i in 0..num_pairs {
+                    let diff_m = i16::from_le_bytes([lo[i * 2], hi[i * 2]]);
+                    let diff_s = i16::from_le_bytes([lo[i * 2 + 1], hi[i * 2 + 1]]);
+                    let m = prev_m.wrapping_add(diff_m);
+                    let s = prev_s.wrapping_add(diff_s);
+                    prev_m = m;
+                    prev_s = s;
+                    let l = m;
+                    let r = s.wrapping_add(l);
+                    out.push(l);
+                    out.push(r);
+                }
+                Ok(out)
+            }
+            _ => {
+                // Mode 0: Raw PCM fallback
+                let raw = &decomp[1..];
+                if raw.len() % 2 != 0 {
+                    return Err("Invalid raw PCM length".into());
+                }
+                let mut out = Vec::with_capacity(raw.len() / 2);
+                for chunk in raw.chunks_exact(2) {
+                    out.push(i16::from_le_bytes([chunk[0], chunk[1]]));
+                }
+                Ok(out)
+            }
+        }
     }
 }
 
@@ -668,18 +804,31 @@ mod tests {
 
     #[test]
     fn test_audio_chunking_and_lz4_roundtrip() {
-        let mut audio_enc = AudioEncoder::new(44100);
-        let samples: Vec<i16> = (0..735 * 2).map(|i| (i % 1000) as i16).collect();
-        audio_enc.push_samples(&samples);
+        let mut audio_enc = AudioEncoder::new(32768);
 
-        let compressed = audio_enc.flush_frame_lz4().expect("Must yield compressed audio");
-        assert!(compressed.len() < samples.len() * 2, "LZ4 must compress repetitive audio PCM");
+        // 1. Test Mono DPCM roundtrip (Left == Right)
+        let mono_samples: Vec<i16> = (0..546).flat_map(|i| {
+            let s = ((i % 100) * 15 - 500) as i16;
+            vec![s, s]
+        }).collect();
+        audio_enc.push_samples(&mono_samples);
 
-        let decomp = lz4_flex::decompress_size_prepended(&compressed).unwrap();
-        let decomp_i16 = unsafe {
-            std::slice::from_raw_parts(decomp.as_ptr() as *const i16, decomp.len() / 2)
-        };
-        assert_eq!(samples, decomp_i16, "Audio PCM must be 100% lossless bit-exact");
+        let comp_mono = audio_enc.flush_frame_lz4().expect("Must yield compressed audio");
+        assert!(comp_mono.len() < mono_samples.len(), "Mono DPCM Byte-Split must achieve >50% compression");
+        let dec_mono = AudioDecoder::decode(&comp_mono).expect("Decode mono must succeed");
+        assert_eq!(mono_samples, dec_mono, "Mono audio PCM must be 100% bit-exact lossless");
+
+        // 2. Test Stereo DPCM roundtrip (Left != Right)
+        let stereo_samples: Vec<i16> = (0..546).flat_map(|i| {
+            let l = ((i % 80) * 20 - 400) as i16;
+            let r = (((i + 15) % 90) * 18 - 350) as i16;
+            vec![l, r]
+        }).collect();
+        audio_enc.push_samples(&stereo_samples);
+
+        let comp_stereo = audio_enc.flush_frame_lz4().expect("Must yield compressed audio");
+        let dec_stereo = AudioDecoder::decode(&comp_stereo).expect("Decode stereo must succeed");
+        assert_eq!(stereo_samples, dec_stereo, "Stereo audio PCM must be 100% bit-exact lossless");
     }
 
     #[test]
