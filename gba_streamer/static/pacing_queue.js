@@ -4,6 +4,8 @@ class PacingQueue {
         this.cushionMs = options.cushionMs ?? 16.666;
         this.maxBacklog = options.maxBacklog ?? 3;
         this.queue = [];
+        this.primed = false;
+        this.holdTicks = 0;
     }
 
     size() {
@@ -17,19 +19,26 @@ class PacingQueue {
     setMode(mode) {
         if (mode === 'smooth' || mode === 'direct') {
             this.mode = mode;
+            this.primed = false;
+            this.holdTicks = 0;
         }
     }
 
     push(bytes, arrivalTime = performance.now()) {
-        const targetTime = this.mode === 'smooth' ? (arrivalTime + this.cushionMs) : arrivalTime;
+        const targetTime = arrivalTime + this.cushionMs;
         this.queue.push({
             bytes,
-            targetTime
+            targetTime,
+            arrivalTime
         });
 
         while (this.queue.length > this.maxBacklog) {
             this.queue.shift();
         }
+    }
+
+    shiftDirect() {
+        return this.queue.shift() || null;
     }
 
     pop(now = performance.now()) {
@@ -41,21 +50,27 @@ class PacingQueue {
             const head = this.queue.shift();
             return {
                 bytes: head.bytes,
-                blit: true
+                blit: true,
+                waitMs: now - head.arrivalTime
             };
         }
 
-        // Smooth mode: pop if target cushion reached OR if >= 2 frames backlogged (catchup)
+        // Smooth mode: pop if target cushion reached OR catchup when backlog >= 2
         const head = this.queue[0];
         if (now >= head.targetTime || this.queue.length >= 2) {
             this.queue.shift();
             return {
                 bytes: head.bytes,
-                blit: true
+                blit: true,
+                waitMs: now - head.arrivalTime
             };
         }
 
         return null;
+    }
+
+    clear() {
+        this.queue.length = 0;
     }
 }
 

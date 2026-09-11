@@ -108,3 +108,74 @@ test('Smooth mode absorbs +/- 3ms Wi-Fi jitter across 60 frames without starving
     assert.strictEqual(starvedCount, 0, `Should have 0 starved display ticks, but had ${starvedCount}`);
     assert.strictEqual(deliveredCount, 58, `Should have delivered all 58 post-warmup frames, delivered ${deliveredCount}`);
 });
+
+test('Smooth mode: holds 1-frame cushion and releases oldest frame when queue depth >= 2', () => {
+    const queue = new PacingQueue({ mode: 'smooth', cushionMs: 16.666, maxBacklog: 3 });
+    const f1 = new Uint8Array([1]);
+    const f2 = new Uint8Array([2]);
+
+    queue.push(f1, 1000.0); // targetTime = 1016.666
+    // At 1010ms with 1 frame, cushion is NOT elapsed yet. Must hold cushion, not pop.
+    assert.strictEqual(queue.pop(1010.0), null, 'Must hold 1-frame cushion');
+
+    // At 1017ms, cushion duration has elapsed, pops f1
+    queue.push(f2, 1012.0);
+    const popped = queue.pop(1017.0);
+    assert.notStrictEqual(popped, null, 'Must pop oldest frame once cushion duration is satisfied');
+    assert.deepStrictEqual(popped.bytes, f1);
+    assert.strictEqual(queue.size(), 1, 'Queue depth must stay at exactly 1 cushion frame');
+});
+
+test('Direct mode: immediately pops frames in FIFO order with 0 cushion', () => {
+    const queue = new PacingQueue({ mode: 'direct' });
+    const f1 = new Uint8Array([1]);
+    const f2 = new Uint8Array([2]);
+
+    queue.push(f1, 1000.0);
+    queue.push(f2, 1001.0);
+
+    // In direct mode, on tick it pops f1 immediately
+    const p1 = queue.pop(1002.0);
+    assert.notStrictEqual(p1, null);
+    assert.deepStrictEqual(p1.bytes, f1, 'Direct mode should pop in FIFO order');
+    assert.strictEqual(queue.size(), 1);
+
+    // On next tick it pops f2
+    const p2 = queue.pop(1018.0);
+    assert.notStrictEqual(p2, null);
+    assert.deepStrictEqual(p2.bytes, f2);
+    assert.strictEqual(queue.size(), 0);
+});
+
+test('shiftDirect(): allows draining stale backlog frames before pop', () => {
+    const queue = new PacingQueue({ mode: 'direct' });
+    const f1 = new Uint8Array([1]);
+    const f2 = new Uint8Array([2]);
+    const f3 = new Uint8Array([3]);
+
+    queue.push(f1, 1000.0);
+    queue.push(f2, 1005.0);
+    queue.push(f3, 1010.0);
+
+    assert.strictEqual(queue.size(), 3);
+
+    // Drain down to 1 frame
+    const drained = [];
+    while (queue.size() > 1) {
+        drained.push(queue.shiftDirect());
+    }
+
+    assert.strictEqual(drained.length, 2);
+    assert.deepStrictEqual(drained[0].bytes, f1);
+    assert.deepStrictEqual(drained[1].bytes, f2);
+    assert.strictEqual(queue.size(), 1);
+
+    // Remaining frame is the freshest frame f3
+    const fresh = queue.pop(1016.0);
+    assert.notStrictEqual(fresh, null);
+    assert.deepStrictEqual(fresh.bytes, f3);
+    assert.strictEqual(fresh.waitMs, 6.0);
+});
+
+
+

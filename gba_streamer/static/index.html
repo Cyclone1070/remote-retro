@@ -539,7 +539,7 @@
             postMessage({ type: 'engine_mode', engine: 'WebGL2 (Hardware Accelerated)' });
         }
 
-        function renderFrame(bytes, blitToGpu = true) {
+        function renderFrame(bytes, blitToGpu = true, waitMs = 0) {
             if (!isReady) {
                 isReady = true;
                 postMessage({ type: 'ready' });
@@ -770,6 +770,9 @@
 
             const t1 = performance.now();
             if (blitToGpu) {
+                if (matchedSeq > 0) {
+                    postMessage({ type: 'frame_presented', seq: matchedSeq, waitMs: waitMs });
+                }
                 if (lastRenderTime > 0) {
                     const dt = t1 - lastRenderTime;
                     honestRenderDeltas.push(dt);
@@ -807,31 +810,36 @@
                 this.cushionMs = options.cushionMs ?? 16.666;
                 this.maxBacklog = options.maxBacklog ?? 3;
                 this.queue = [];
+                this.primed = false;
             }
             size() { return this.queue.length; }
             getMode() { return this.mode; }
             setMode(mode) {
                 if (mode === 'smooth' || mode === 'direct') {
                     this.mode = mode;
+                    this.primed = false;
                 }
             }
             push(bytes, arrivalTime = performance.now()) {
-                const targetTime = this.mode === 'smooth' ? (arrivalTime + this.cushionMs) : arrivalTime;
-                this.queue.push({ bytes, targetTime });
+                const targetTime = arrivalTime + this.cushionMs;
+                this.queue.push({ bytes, targetTime, arrivalTime });
                 while (this.queue.length > this.maxBacklog) {
                     this.queue.shift();
                 }
+            }
+            shiftDirect() {
+                return this.queue.shift() || null;
             }
             pop(now = performance.now()) {
                 if (this.queue.length === 0) return null;
                 if (this.mode === 'direct') {
                     const head = this.queue.shift();
-                    return { bytes: head.bytes, blit: true };
+                    return { bytes: head.bytes, blit: true, waitMs: now - head.arrivalTime };
                 }
                 const head = this.queue[0];
                 if (now >= head.targetTime || this.queue.length >= 2) {
                     this.queue.shift();
-                    return { bytes: head.bytes, blit: true };
+                    return { bytes: head.bytes, blit: true, waitMs: now - head.arrivalTime };
                 }
                 return null;
             }
@@ -846,9 +854,20 @@
 
         function displayTick() {
             requestAnimationFrame(displayTick);
+            if (pacingQueue.getMode() === 'direct') {
+                while (pacingQueue.size() > 1) {
+                    const stale = pacingQueue.shiftDirect();
+                    renderFrame(stale.bytes, false);
+                }
+            } else {
+                while (pacingQueue.size() > 2) {
+                    const stale = pacingQueue.shiftDirect();
+                    renderFrame(stale.bytes, false);
+                }
+            }
             const frame = pacingQueue.pop(performance.now());
             if (frame) {
-                renderFrame(frame.bytes, frame.blit);
+                renderFrame(frame.bytes, frame.blit, frame.waitMs);
             }
         }
 
@@ -929,6 +948,7 @@
 
         const workerBlob = new Blob([document.getElementById('workerCode').textContent], { type: 'text/javascript' });
         const worker = new Worker(URL.createObjectURL(workerBlob));
+        window.worker = worker;
 
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = protocol + '//' + window.location.host + '/ws';
@@ -1119,6 +1139,17 @@
                 }
             } else if (data.type === 'probe_result') {
                 handleProbeResult(data.lag);
+            } else if (data.type === 'frame_presented') {
+                const tPress = window.__userIoPendingPresses.get(data.seq);
+                if (tPress > 0) {
+                    window.__userIoPendingPresses.delete(data.seq);
+                    const m2p = performance.now() - tPress;
+                    if (m2p > 0 && m2p < 250) {
+                        window.__honestUserIoSamples.push({ m2p: parseFloat(m2p.toFixed(1)), waitMs: parseFloat((data.waitMs || 0).toFixed(1)) });
+                        if (window.__honestUserIoSamples.length > 3600) window.__honestUserIoSamples.shift();
+                        window.__latestTrueM2p = m2p;
+                    }
+                }
             } else if (data.type === 'stats') {
                 if (data.recentDeltas) {
                     window.__honestRenderHistory.push(...data.recentDeltas);
@@ -1128,7 +1159,7 @@
                 }
                 fpsEl.innerText = data.fps;
                 hostEl.innerText = data.hostMs + ' ms';
-                totalEl.innerText = data.totalM2P + ' ms';
+                totalEl.innerText = (window.__latestTrueM2p > 0 ? window.__latestTrueM2p.toFixed(1) : data.totalM2P) + ' ms';
                 netEl.innerText = data.netRtt + ' ms';
                 audioStatusEl.innerText = (window.getAudioQueueLength() / GBA_SAMPLE_RATE * 1000).toFixed(1) + ' ms';
                 
@@ -1138,13 +1169,39 @@
             }
         };
 
-        // Instant Input Handler
+        // Instant Input Handler & User I/O Tracking
+        window.__userIoPendingPresses = new Map();
+        window.__honestUserIoSamples = [];
+        window.__latestTrueM2p = 0;
         let inputMask = 0;
         let inputSeq = 0;
 
-        function sendInputInstant() {
-            inputSeq = (inputSeq + 1) & 0xFF;
+        window.getHonestUserIoMetrics = function() {
+            const raw = window.__honestUserIoSamples.map(x => typeof x === 'object' ? x.m2p : x);
+            const s = [...raw].sort((a, b) => a - b);
+            const n = s.length;
+            if (n === 0) return null;
+            const mean = s.reduce((a, b) => a + b, 0) / n;
+            const waits = window.__honestUserIoSamples.map(x => typeof x === 'object' ? x.waitMs : 0);
+            const avgWait = waits.length > 0 ? (waits.reduce((a,b)=>a+b,0)/waits.length) : 0;
+            return {
+                samples: n,
+                p50: s[Math.floor(n * 0.50)].toFixed(1),
+                p95: s[Math.floor(n * 0.95)].toFixed(1),
+                mean: mean.toFixed(1),
+                min: s[0].toFixed(1),
+                max: s[s.length - 1].toFixed(1),
+                avgWaitMs: avgWait.toFixed(1),
+                rawSamples: window.__honestUserIoSamples
+            };
+        };
+
+        function sendInputInstant(isNewPress = false) {
+            inputSeq = (inputSeq % 255) + 1;
             const tSent = performance.now();
+            if (isNewPress) {
+                window.__userIoPendingPresses.set(inputSeq, tSent);
+            }
             const buf = new Uint8Array(3);
             buf[0] = inputSeq;
             buf[1] = inputMask & 0xFF;
@@ -1152,7 +1209,18 @@
             worker.postMessage({ type: 'input', seq: inputSeq, sentTime: tSent, buffer: buf.buffer }, [buf.buffer]);
         }
 
-        setInterval(sendInputInstant, 32);
+        // Heartbeat keepalive sends sequence 0 when idle (not tracked as user input motion)
+        function sendHeartbeat() {
+            if (inputMask !== 0) {
+                // Refresh active held buttons without allocating a user press measurement
+                sendInputInstant(false);
+            } else {
+                // Keepalive on idle without allocating input sequence
+                const buf = new Uint8Array([0, 0, 0]);
+                worker.postMessage({ type: 'input', seq: 0, sentTime: 0, buffer: buf.buffer }, [buf.buffer]);
+            }
+        }
+        setInterval(sendHeartbeat, 50);
 
         async function updatePing() {
             const t0 = performance.now();
@@ -1199,6 +1267,7 @@
         if (pacingToggleEl) {
             pacingToggleEl.addEventListener('click', togglePacing);
         }
+        window.setPacingMode = updatePacingUI;
         updatePacingUI(currentPacingMode);
 
         function updateRunaheadUI(frames) {
@@ -1457,7 +1526,7 @@
             else if (k === 'e') { inputMask |= (1 << 8); e.preventDefault(); }
             else if (k === 'q') { inputMask |= (1 << 9); e.preventDefault(); }
             if (inputMask !== prev) {
-                sendInputInstant();
+                sendInputInstant(true);
             }
         });
 
@@ -1476,7 +1545,7 @@
             else if (k === 'e') { inputMask &= ~(1 << 8); e.preventDefault(); }
             else if (k === 'q') { inputMask &= ~(1 << 9); e.preventDefault(); }
             if (inputMask !== prev) {
-                sendInputInstant();
+                sendInputInstant(false);
             }
         });
     </script>
