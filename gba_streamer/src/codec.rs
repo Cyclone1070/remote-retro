@@ -41,6 +41,10 @@ impl PaletteEncoder {
         }
     }
 
+    pub fn force_keyframe(&mut self) {
+        self.frame_counter = 0;
+    }
+
     pub fn encode(&mut self, raw_frame: &[u16]) -> (u8, Vec<u8>) {
         self.frame_counter += 1;
 
@@ -88,23 +92,26 @@ impl PaletteEncoder {
                             self.delta_payload.push(0); // Mode 0: Solid
                             self.delta_payload.extend_from_slice(&first.to_le_bytes());
                         } else {
-                            // Mode 1: Raw 64 RGB555 pixels
-                            self.delta_payload.push(1);
-                            for &p in &tile {
-                                self.delta_payload.extend_from_slice(&p.to_le_bytes());
+                            // Mode 2: XOR Difference 64 RGB555 pixels
+                            self.delta_payload.push(2);
+                            for py in 0..BLOCK_SIZE {
+                                let y = by * BLOCK_SIZE + py;
+                                for px in 0..BLOCK_SIZE {
+                                    let x = bx * BLOCK_SIZE + px;
+                                    let p = y * GBA_WIDTH + x;
+                                    let diff = raw_frame[p] ^ self.prev_frame[p];
+                                    self.delta_payload.extend_from_slice(&diff.to_le_bytes());
+                                }
                             }
                         }
                     }
                 }
             }
 
-            // If changes are compact (<= 250 blocks out of 600, or 0 if unchanged)
-            if changed_blocks <= 250 {
-                let count_bytes = changed_blocks.to_le_bytes();
-                self.delta_payload[0..2].copy_from_slice(&count_bytes);
-                self.prev_frame.copy_from_slice(raw_frame);
-                return (8u8, lz4_flex::compress_prepend_size(&self.delta_payload));
-            }
+            let count_bytes = changed_blocks.to_le_bytes();
+            self.delta_payload[0..2].copy_from_slice(&count_bytes);
+            self.prev_frame.copy_from_slice(raw_frame);
+            return (8u8, lz4_flex::compress_prepend_size(&self.delta_payload));
         }
 
         // Full Keyframe Palette Encoding
@@ -495,6 +502,21 @@ impl FallbackDecoder {
                             }
                             offset += BLOCK_PIXELS * 2;
                         }
+                        2 => {
+                            // Mode 2: XOR Difference block
+                            if offset + BLOCK_PIXELS * 2 > decomp.len() { return Err("Truncated XOR block".into()); }
+                            for py in 0..BLOCK_SIZE {
+                                let y = by + py;
+                                for px in 0..BLOCK_SIZE {
+                                    let diff = u16::from_le_bytes([
+                                        decomp[offset + (py * BLOCK_SIZE + px) * 2],
+                                        decomp[offset + (py * BLOCK_SIZE + px) * 2 + 1],
+                                    ]);
+                                    tile[py * BLOCK_SIZE + px] = self.screen[y * GBA_WIDTH + (bx + px)] ^ diff;
+                                }
+                            }
+                            offset += BLOCK_PIXELS * 2;
+                        }
                         _ => return Err("Invalid block mode".into()),
                     }
 
@@ -705,4 +727,51 @@ mod tests {
         assert!(decoder.apply_payload(&payload3).is_ok());
         assert_eq!(decoder.vram[128], 0xEE);
     }
+
+    #[test]
+    fn test_palette_encoder_xor_delta_roundtrip() {
+        let mut encoder = PaletteEncoder::new();
+
+        // Frame 1: Keyframe
+        let frame1 = vec![0x1234u16; TOTAL_PIXELS];
+        let (flag1, _) = encoder.encode(&frame1);
+        assert_eq!(flag1, 4, "Solid color frame should compress with 16-color palette");
+
+        // Frame 2: Modify a single 8x8 block with textured pattern
+        let mut frame2 = frame1.clone();
+        for py in 0..8 {
+            for px in 0..8 {
+                let p = py * GBA_WIDTH + px;
+                frame2[p] = (0x5678 + py * 16 + px) as u16;
+            }
+        }
+
+        let (flag2, payload2) = encoder.encode(&frame2);
+        assert_eq!(flag2, 8, "Inter-frame must use Tile Delta (Flag 8)");
+
+        // Decompress payload and verify Mode 2 XOR decoding
+        let decomp = lz4_flex::decompress_size_prepended(&payload2).expect("LZ4 decompress must succeed");
+        let num_blocks = u16::from_le_bytes([decomp[0], decomp[1]]);
+        assert_eq!(num_blocks, 1, "Exactly 1 block changed");
+
+        let b_idx = u16::from_le_bytes([decomp[2], decomp[3]]);
+        assert_eq!(b_idx, 0, "Block index must be 0");
+        let mode = decomp[4];
+        assert_eq!(mode, 2, "Changed multi-color block must use Mode 2 (XOR)");
+
+        // Reconstruct frame and verify 100% bit-exact match
+        let mut reconstructed = frame1.clone();
+        let mut offset = 5;
+        for py in 0..8 {
+            for px in 0..8 {
+                let diff = u16::from_le_bytes([decomp[offset], decomp[offset + 1]]);
+                offset += 2;
+                let p = py * GBA_WIDTH + px;
+                reconstructed[p] ^= diff;
+            }
+        }
+
+        assert_eq!(reconstructed, frame2, "Reconstructed frame after XOR delta must be 100% bit-exact");
+    }
 }
+

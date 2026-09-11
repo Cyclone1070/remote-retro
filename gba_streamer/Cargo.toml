@@ -63,3 +63,15 @@ path = "benches/bench_runahead.rs"
 [[bin]]
 name = "bench_localhost_pacing"
 path = "benches/bench_localhost_pacing.rs"
+
+[[bin]]
+name = "bench_stuntman_opt"
+path = "benches/bench_stuntman_opt.rs"
+
+[[bin]]
+name = "bench_2d_compare"
+path = "benches/bench_2d_compare.rs"
+
+[[bin]]
+name = "bench_scroll_comp"
+path = "benches/bench_scroll_comp.rs"

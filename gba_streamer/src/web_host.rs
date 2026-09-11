@@ -29,6 +29,13 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
     let step_trigger = Arc::new(std::sync::atomic::AtomicI32::new(-1));
     let rom_game_code = core.rom_game_code.clone();
 
+    // Stream mode: 0 = Pixel XOR (Default), 1 = PPU State (Optional)
+    let initial_mode = match std::env::var("STREAM_MODE").as_deref() {
+        Ok("ppu") => 1u8,
+        _ => 0u8,
+    };
+    let stream_mode = Arc::new(std::sync::atomic::AtomicU8::new(initial_mode));
+
     let seq_producer = last_input_seq.clone();
     let mask_producer = input_mask.clone();
     let latched_producer = latched_mask.clone();
@@ -37,6 +44,7 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
     let probe_producer = probe_trigger.clone();
     let is_paused_producer = is_paused.clone();
     let step_producer = step_trigger.clone();
+    let stream_mode_producer = stream_mode.clone();
 
     std::thread::spawn(move || {
         let mut ppu_enc = PpuStateEncoder::new();
@@ -104,13 +112,14 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
                         &mut oam_buf,
                         &mut io_buf,
                     );
-                    if ppu_ok {
+                    let cur_m = stream_mode_producer.load(Ordering::Relaxed);
+                    if cur_m == 1 && ppu_ok {
                         let t_enc = Instant::now();
                         let payload = ppu_enc.encode(&oam_buf, &io_buf, &pal_buf, &vram_buf);
                         let dur = t_enc.elapsed().as_micros() as u32;
                         (FLAG_PPU_STATE, payload, dur)
                     } else {
-                        let (_, raw_frame, _) = core.step();
+                        let raw_frame = core.get_last_frame();
                         let t_enc = Instant::now();
                         let (f, p) = fallback_enc.encode(&raw_frame);
                         let dur = t_enc.elapsed().as_micros() as u32;
@@ -143,6 +152,7 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
 
             if force_keyframe_producer.swap(false, Ordering::Relaxed) {
                 ppu_enc.force_keyframe();
+                fallback_enc.force_keyframe();
             }
 
             let probe_req = probe_producer.swap(-1, Ordering::Relaxed);
@@ -174,13 +184,14 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
                 &mut io_buf,
             );
 
-            let (flag, video_payload, _enc_us) = if ppu_ok {
+            let current_mode = stream_mode_producer.load(Ordering::Relaxed);
+            let (flag, video_payload, _enc_us) = if current_mode == 1 && ppu_ok {
                 let t_enc = Instant::now();
                 let payload = ppu_enc.encode(&oam_buf, &io_buf, &pal_buf, &vram_buf);
                 let dur = t_enc.elapsed().as_micros() as u32;
                 (FLAG_PPU_STATE, payload, dur)
             } else {
-                let (_, raw_frame, _) = core.step();
+                let raw_frame = core.get_last_frame();
                 let t_enc = Instant::now();
                 let (f, p) = fallback_enc.encode(&raw_frame);
                 let dur = t_enc.elapsed().as_micros() as u32;
@@ -247,6 +258,7 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
     let is_paused_for_ws = is_paused.clone();
     let step_for_ws = step_trigger.clone();
     let game_code_ws = rom_game_code.clone();
+    let stream_mode_consumer = stream_mode.clone();
 
     let ws_route = warp::path("ws")
         .and(warp::ws())
@@ -261,6 +273,7 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
             let is_paused_signal = is_paused_for_ws.clone();
             let step_signal_ws = step_for_ws.clone();
             let game_code = game_code_ws.clone();
+            let stream_mode_ws = stream_mode_consumer.clone();
 
             ws.on_upgrade(move |websocket| async move {
                     let (mut ws_sender, mut ws_receiver) = websocket.split();
@@ -280,6 +293,11 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
                                     runahead.store(target_f, Ordering::Relaxed);
                                     crate::runahead_db::cache_measured_runahead(game_code.clone(), target_f);
                                     println!("Client set Run-Ahead to: {}F (saved to config)", target_f);
+                                } else if bytes.len() >= 3 && bytes[0] == 0xAA && bytes[1] == 0x57 {
+                                    let mode = bytes[2];
+                                    stream_mode_ws.store(mode, Ordering::Relaxed);
+                                    keyframe_clone.store(true, Ordering::Relaxed);
+                                    println!("Client switched stream mode to: {}", if mode == 1 { "PPU State (Optional)" } else { "Pixel XOR Delta (Default)" });
                                 } else if bytes.len() >= 3 && bytes[0] == 0xAA && bytes[1] == 0x50 {
                                     let p = bytes[2];
                                     if p == 2 {

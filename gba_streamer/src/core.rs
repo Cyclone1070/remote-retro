@@ -495,6 +495,10 @@ impl RetroCore {
         }
     }
 
+    pub fn get_last_frame(&self) -> Vec<u16> {
+        LAST_FRAME_16.lock().unwrap().clone()
+    }
+
     pub fn has_ppu_memory() -> bool {
         !VRAM_PTR.load(Ordering::Relaxed).is_null()
             && !PAL_PTR.load(Ordering::Relaxed).is_null()
