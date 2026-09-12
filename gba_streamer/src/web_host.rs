@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use warp::ws::Ws;
 use warp::Filter;
 
-use crate::codec::{AudioEncoder, PaletteEncoder, PpuStateEncoder, FLAG_PPU_STATE};
+use crate::codec::{AudioEncoder, PaletteEncoder, PpuStateEncoder, StreamEngineMode, StreamProfiler, FLAG_PPU_STATE};
 use crate::core::RetroCore;
 
 const BROWSER_HTML: &str = include_str!("../static/index.html");
@@ -79,10 +79,11 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
     let rom_game_code = Arc::new(Mutex::new(core.rom_game_code.clone()));
     let switch_rom_req = Arc::new(Mutex::new(None::<String>));
 
-    // Stream mode: 0 = Pixel XOR (Default), 1 = PPU State (Optional)
+    // Stream mode: 0 = Pixel XOR, 1 = PPU State, 2 = Auto-Profile (Default)
     let initial_mode = match std::env::var("STREAM_MODE").as_deref() {
+        Ok("pixel") => 0u8,
         Ok("ppu") => 1u8,
-        _ => 0u8,
+        _ => 2u8,
     };
     let stream_mode = Arc::new(std::sync::atomic::AtomicU8::new(initial_mode));
 
@@ -102,6 +103,8 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
         let mut ppu_enc = PpuStateEncoder::new();
         let mut fallback_enc = PaletteEncoder::new();
         let mut audio_enc = AudioEncoder::new(44100);
+        let mut profiler = StreamProfiler::new(StreamEngineMode::from(initial_mode));
+        let mut prev_use_ppu = false;
 
         let mut vram_buf = vec![0u8; 98304];
         let mut pal_buf = vec![0u8; 1024];
@@ -186,7 +189,14 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
                         &mut io_buf,
                     );
                     let cur_m = stream_mode_producer.load(Ordering::Relaxed);
-                    if cur_m == 1 && ppu_ok {
+                    profiler.set_setting(StreamEngineMode::from(cur_m));
+                    let use_ppu = profiler.should_use_ppu(&io_buf, ppu_ok);
+                    if use_ppu != prev_use_ppu {
+                        ppu_enc.force_keyframe();
+                        fallback_enc.force_keyframe();
+                        prev_use_ppu = use_ppu;
+                    }
+                    if use_ppu {
                         let t_enc = Instant::now();
                         let payload = ppu_enc.encode(&oam_buf, &io_buf, &pal_buf, &vram_buf);
                         let dur = t_enc.elapsed().as_micros() as u32;
@@ -258,7 +268,15 @@ pub async fn run_web_host(core_path: String, rom_path: String, bind_addr: String
             );
 
             let current_mode = stream_mode_producer.load(Ordering::Relaxed);
-            let (flag, video_payload, _enc_us) = if current_mode == 1 && ppu_ok {
+            profiler.set_setting(StreamEngineMode::from(current_mode));
+            let use_ppu = profiler.should_use_ppu(&io_buf, ppu_ok);
+            if use_ppu != prev_use_ppu {
+                ppu_enc.force_keyframe();
+                fallback_enc.force_keyframe();
+                prev_use_ppu = use_ppu;
+            }
+
+            let (flag, video_payload, _enc_us) = if use_ppu {
                 let t_enc = Instant::now();
                 let payload = ppu_enc.encode(&oam_buf, &io_buf, &pal_buf, &vram_buf);
                 let dur = t_enc.elapsed().as_micros() as u32;

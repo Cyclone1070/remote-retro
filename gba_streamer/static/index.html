@@ -662,11 +662,12 @@
         <div class="sidebar-section">
             <div class="sidebar-section-title">Stream Engine</div>
             <div class="segmented-control">
-                <button id="modePixelBtn" class="segmented-btn active" onclick="window.setStreamMode('pixel')">Pixel XOR (Default)</button>
-                <button id="modePpuBtn" class="segmented-btn" onclick="window.setStreamMode('ppu')">PPU State (Optional)</button>
+                <button id="modeAutoBtn" class="segmented-btn active" onclick="window.setStreamMode('auto')">⚡ Auto-Profile</button>
+                <button id="modePixelBtn" class="segmented-btn" onclick="window.setStreamMode('pixel')">Pixel XOR</button>
+                <button id="modePpuBtn" class="segmented-btn" onclick="window.setStreamMode('ppu')">PPU State</button>
             </div>
             <div class="section-hint" id="streamModeHint">
-                <strong>Pixel XOR Delta</strong>: Universal (0.1–0.7 KB/frame, 13–51 µs encode). Works on all 2D, 3D, and bitmap games.
+                <strong>⚡ Auto-Profile (Default)</strong>: Automatically inspects GBA DISPCNT (Mode 0–2 uses PPU State, Mode 3–5 uses Pixel XOR).
             </div>
         </div>
 
@@ -823,6 +824,7 @@
         let unpackedIndicesBuf = new Uint8Array(38400);
         let fullFrameRgba = new Uint8Array(240 * 160 * 4);
         let fullFrameRgb565 = new Uint16Array(240 * 160);
+        let lastFrameFlag = 8;
 
         let wasmInstance = null;
         let wasmVramPtr = 0;
@@ -1037,6 +1039,7 @@
             const t0 = performance.now();
             const headerByte0 = bytes[0];
             const flag = headerByte0 & 0x3F;
+            lastFrameFlag = flag;
             activeRunahead = headerByte0 >> 6;
             const matchedSeq = bytes[1];
             const audioLen = bytes[2] | (bytes[3] << 8);
@@ -1302,7 +1305,8 @@
                         netRtt: networkRtt.toFixed(1),
                         runahead: activeRunahead,
                         pacing: pacingQueue.getMode(),
-                        recentDeltas: honestRenderDeltas.slice(-30)
+                        recentDeltas: honestRenderDeltas.slice(-30),
+                        activeCodec: lastFrameFlag === 16 ? 'PPU STATE' : 'PIXEL XOR'
                     });
                     decompTimes = [];
                 }
@@ -1391,7 +1395,7 @@
                 ws.binaryType = 'arraybuffer';
                 ws.onopen = () => {
                     ws.send(new Uint8Array([0xAA, 0x4B]));
-                    const mCode = data.initialMode === 'ppu' ? 0x01 : 0x00;
+                    const mCode = data.initialMode === 'ppu' ? 0x01 : data.initialMode === 'pixel' ? 0x00 : 0x02;
                     ws.send(new Uint8Array([0xAA, 0x57, mCode]));
                 };
 
@@ -1507,7 +1511,7 @@
         const wsUrl = protocol + '//' + window.location.host + '/ws';
         const wasmUrl = window.location.origin + '/gba_ppu.wasm';
 
-        let currentStreamMode = localStorage.getItem('gba_stream_mode') || (new URLSearchParams(window.location.search).get('mode') === 'ppu' ? 'ppu' : 'pixel');
+        let currentStreamMode = localStorage.getItem('gba_stream_mode') || (new URLSearchParams(window.location.search).get('mode') || 'auto');
 
         worker.postMessage({
             type: 'init',
@@ -1726,6 +1730,16 @@
                 if (data.runahead !== undefined && !userManuallyToggled) {
                     updateRunaheadUI(data.runahead);
                 }
+
+                if (data.activeCodec) {
+                    window.__lastActiveCodec = data.activeCodec;
+                    if (currentStreamMode === 'auto') {
+                        const streamModeBadge = document.getElementById('streamModeBadge');
+                        if (streamModeBadge) {
+                            streamModeBadge.innerText = 'AUTO (' + data.activeCodec + ')';
+                        }
+                    }
+                }
             }
         };
 
@@ -1834,6 +1848,7 @@
         window.setPacingMode = updatePacingUI;
         updatePacingUI(currentPacingMode);
 
+        const modeAutoBtn = document.getElementById('modeAutoBtn');
         const modePixelBtn = document.getElementById('modePixelBtn');
         const modePpuBtn = document.getElementById('modePpuBtn');
         const streamModeBadge = document.getElementById('streamModeBadge');
@@ -1842,25 +1857,35 @@
         function updateStreamModeUI(mode) {
             currentStreamMode = mode;
             localStorage.setItem('gba_stream_mode', mode);
-            if (modePixelBtn && modePpuBtn) {
-                modePixelBtn.classList.toggle('active', mode === 'pixel');
-                modePpuBtn.classList.toggle('active', mode === 'ppu');
-            }
+            if (modeAutoBtn) modeAutoBtn.classList.toggle('active', mode === 'auto');
+            if (modePixelBtn) modePixelBtn.classList.toggle('active', mode === 'pixel');
+            if (modePpuBtn) modePpuBtn.classList.toggle('active', mode === 'ppu');
+
             if (streamModeBadge) {
-                streamModeBadge.innerText = mode === 'ppu' ? 'PPU STATE' : 'PIXEL XOR';
-            }
-            if (streamModeHint) {
-                if (mode === 'ppu') {
-                    streamModeHint.innerHTML = '<strong>PPU State (Optional)</strong>: Hardware Tilemap Streaming (0.37 KB/frame, 6 µs encode). Ideal for pure 2D tilemap games.';
+                if (mode === 'auto') {
+                    const active = window.__lastActiveCodec || 'PIXEL XOR';
+                    streamModeBadge.innerText = 'AUTO (' + active + ')';
+                } else if (mode === 'ppu') {
+                    streamModeBadge.innerText = 'PPU STATE';
                 } else {
-                    streamModeHint.innerHTML = '<strong>Pixel XOR Delta</strong>: Universal (0.1–0.7 KB/frame, 13–51 µs encode). Works on all 2D, 3D, and bitmap games.';
+                    streamModeBadge.innerText = 'PIXEL XOR';
+                }
+            }
+
+            if (streamModeHint) {
+                if (mode === 'auto') {
+                    streamModeHint.innerHTML = '<strong>⚡ Auto-Profile (Default)</strong>: Evaluates GBA DISPCNT (Modes 0–2: PPU State; Modes 3–5: Pixel XOR). Adapts seamlessly on game switch.';
+                } else if (mode === 'ppu') {
+                    streamModeHint.innerHTML = '<strong>PPU State (Manual)</strong>: Hardware Tilemap Streaming (0.37 KB/frame, 6 µs encode). Ideal for pure 2D tilemap games.';
+                } else {
+                    streamModeHint.innerHTML = '<strong>Pixel XOR Delta (Manual)</strong>: Universal (0.1–0.7 KB/frame, 13–51 µs encode). Works on all 2D, 3D, and bitmap games.';
                 }
             }
         }
 
         function setStreamMode(mode) {
             updateStreamModeUI(mode);
-            const mCode = mode === 'ppu' ? 0x01 : 0x00;
+            const mCode = mode === 'ppu' ? 0x01 : mode === 'pixel' ? 0x00 : 0x02;
             const ctrl = new Uint8Array([0xAA, 0x57, mCode]);
             worker.postMessage({ type: 'control', buffer: ctrl.buffer }, [ctrl.buffer]);
         }

@@ -446,6 +446,86 @@ impl PpuStateEncoder {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamEngineMode {
+    PixelXor = 0,
+    PpuState = 1,
+    Auto = 2,
+}
+
+impl From<u8> for StreamEngineMode {
+    fn from(val: u8) -> Self {
+        match val {
+            1 => StreamEngineMode::PpuState,
+            2 => StreamEngineMode::Auto,
+            _ => StreamEngineMode::PixelXor,
+        }
+    }
+}
+
+pub struct StreamProfiler {
+    mode_setting: StreamEngineMode,
+    active_engine: u8, // 0 = PixelXor, 1 = PpuState
+}
+
+impl StreamProfiler {
+    pub fn new(setting: StreamEngineMode) -> Self {
+        Self {
+            mode_setting: setting,
+            active_engine: match setting {
+                StreamEngineMode::PpuState => 1,
+                _ => 0,
+            },
+        }
+    }
+
+    pub fn set_setting(&mut self, setting: StreamEngineMode) {
+        self.mode_setting = setting;
+    }
+
+    pub fn mode_setting(&self) -> StreamEngineMode {
+        self.mode_setting
+    }
+
+    /// Evaluates current GBA I/O state (DISPCNT) and returns whether PPU state streaming should be used.
+    pub fn should_use_ppu(&mut self, io_reg: &[u8], ppu_memory_mapped: bool) -> bool {
+        if !ppu_memory_mapped {
+            self.active_engine = 0;
+            return false;
+        }
+
+        match self.mode_setting {
+            StreamEngineMode::PpuState => {
+                self.active_engine = 1;
+                true
+            }
+            StreamEngineMode::PixelXor => {
+                self.active_engine = 0;
+                false
+            }
+            StreamEngineMode::Auto => {
+                // Read GBA DISPCNT register (IO offset 0x00, bits 0..2)
+                let gba_bg_mode = io_reg.first().map(|&b| b & 0x07).unwrap_or(0);
+                if gba_bg_mode >= 3 {
+                    // Modes 3, 4, 5: Bitmap software 3D rendering modes (Stuntman, Worms, Payback)
+                    // Bitmap modes generate massive VRAM updates; Pixel XOR is 6.6x to 30x more compact.
+                    self.active_engine = 0;
+                    false
+                } else {
+                    // Modes 0, 1, 2: Hardware tilemap / OAM sprite modes (Sushi Cat, Mario, Zelda)
+                    // VRAM is mostly static; PPU state is up to 7x more compact.
+                    self.active_engine = 1;
+                    true
+                }
+            }
+        }
+    }
+
+    pub fn active_engine(&self) -> u8 {
+        self.active_engine
+    }
+}
+
 pub struct PpuState {
     pub oam: [u8; 1024],
     pub io: [u8; 128],
@@ -921,6 +1001,52 @@ mod tests {
         }
 
         assert_eq!(reconstructed, frame2, "Reconstructed frame after XOR delta must be 100% bit-exact");
+    }
+
+    #[test]
+    fn test_stream_profiler_auto_detection() {
+        let mut profiler = StreamProfiler::new(StreamEngineMode::Auto);
+
+        // Test Mode 0 (Sushi Cat / Tilemap): should select PPU
+        let io_mode0 = vec![0x00u8; 128];
+        assert!(profiler.should_use_ppu(&io_mode0, true));
+        assert_eq!(profiler.active_engine(), 1);
+
+        // Test Mode 1 & 2 (Affine Tilemaps): should select PPU
+        let mut io_mode1 = vec![0x00u8; 128];
+        io_mode1[0] = 0x01;
+        assert!(profiler.should_use_ppu(&io_mode1, true));
+        assert_eq!(profiler.active_engine(), 1);
+
+        let mut io_mode2 = vec![0x00u8; 128];
+        io_mode2[0] = 0x02;
+        assert!(profiler.should_use_ppu(&io_mode2, true));
+        assert_eq!(profiler.active_engine(), 1);
+
+        // Test Mode 4 (Worms / Stuntman Bitmap Software 3D): should select Pixel XOR
+        let mut io_mode4 = vec![0x00u8; 128];
+        io_mode4[0] = 0x04;
+        assert!(!profiler.should_use_ppu(&io_mode4, true));
+        assert_eq!(profiler.active_engine(), 0);
+
+        // Test Mode 3 (Direct Bitmap 15-bit): should select Pixel XOR
+        let mut io_mode3 = vec![0x00u8; 128];
+        io_mode3[0] = 0x03;
+        assert!(!profiler.should_use_ppu(&io_mode3, true));
+        assert_eq!(profiler.active_engine(), 0);
+
+        // Without PPU memory mapped, must always fall back to Pixel XOR
+        assert!(!profiler.should_use_ppu(&io_mode0, false));
+        assert_eq!(profiler.active_engine(), 0);
+
+        // Explicit manual overrides
+        profiler.set_setting(StreamEngineMode::PixelXor);
+        assert!(!profiler.should_use_ppu(&io_mode0, true));
+        assert_eq!(profiler.active_engine(), 0);
+
+        profiler.set_setting(StreamEngineMode::PpuState);
+        assert!(profiler.should_use_ppu(&io_mode4, true));
+        assert_eq!(profiler.active_engine(), 1);
     }
 }
 
